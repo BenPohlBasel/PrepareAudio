@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PrepareAudio</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-mode="merge">
+  <header class="top">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="3" y="13" width="2.6" height="6" rx="1.3"/><rect x="7.4" y="9" width="2.6" height="14" rx="1.3"/>
+        <rect x="11.8" y="5" width="2.6" height="22" rx="1.3"/><rect x="16.2" y="11" width="2.6" height="10" rx="1.3"/>
+        <rect x="20.6" y="7" width="2.6" height="18" rx="1.3"/><rect x="25" y="12" width="2.6" height="8" rx="1.3"/>
+      </svg>
+      <div>
+        <h1>PrepareAudio</h1>
+        <p>DJI Mic 2: zusammenfügen, synchronisieren, mastern</p>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button data-mode="merge" class="on"><span class="num">1</span>Zusammenfügen</button>
+      <button data-mode="sync"><span class="num">2</span>Synchronisieren</button>
+      <button data-mode="master"><span class="num">3</span>Mastern</button>
+    </nav>
+    <div class="top-actions master-only" id="master-top-actions" hidden>
+      <button class="btn ghost" id="master-rescan" title="Dieselben Ordner erneut messen">Neu messen</button>
+      <button class="btn ghost" id="master-pick-again">Anderer Ordner…</button>
+    </div>
+    <div class="top-actions sync-only" id="sync-top-actions" hidden>
+      <button class="btn ghost" id="sync-rescan" title="Dieselben Ordner erneut analysieren">Neu analysieren</button>
+      <button class="btn ghost" id="sync-pick-again">Anderer Ordner…</button>
+    </div>
+    <button class="info-btn" id="info-open" title="Info und Lizenzen" aria-label="Info und Lizenzen">i</button>
+    <div class="top-actions merge-only" id="top-actions" hidden>
+      <button class="btn ghost" id="rescan" title="Dieselben Ordner erneut durchsuchen">Neu scannen</button>
+      <button class="btn ghost" id="pick-again">Anderer Ordner…</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="empty merge-only" id="empty">
+      <div class="dropzone" id="dropzone">
+        <svg class="illu" viewBox="0 0 320 96" aria-hidden="true">
+          <g class="frag">
+            <rect x="8" y="40" width="6" height="16" rx="3"/><rect x="20" y="28" width="6" height="40" rx="3"/><rect x="32" y="18" width="6" height="60" rx="3"/><rect x="44" y="34" width="6" height="28" rx="3"/><rect x="56" y="24" width="6" height="48" rx="3"/>
+          </g>
+          <g class="frag">
+            <rect x="84" y="30" width="6" height="36" rx="3"/><rect x="96" y="14" width="6" height="68" rx="3"/><rect x="108" y="36" width="6" height="24" rx="3"/><rect x="120" y="22" width="6" height="52" rx="3"/>
+          </g>
+          <g class="frag">
+            <rect x="148" y="26" width="6" height="44" rx="3"/><rect x="160" y="38" width="6" height="20" rx="3"/><rect x="172" y="20" width="6" height="56" rx="3"/>
+          </g>
+          <path class="arrow" d="M196 48h40m-10-9 10 9-10 9"/>
+          <g class="whole">
+            <rect x="252" y="40" width="4" height="16" rx="2"/><rect x="260" y="28" width="4" height="40" rx="2"/><rect x="268" y="18" width="4" height="60" rx="2"/><rect x="276" y="30" width="4" height="36" rx="2"/><rect x="284" y="14" width="4" height="68" rx="2"/><rect x="292" y="26" width="4" height="44" rx="2"/><rect x="300" y="38" width="4" height="20" rx="2"/><rect x="308" y="20" width="4" height="56" rx="2"/>
+          </g>
+        </svg>
+        <h2>Ordner mit Aufnahmen hierher ziehen</h2>
+        <p>Sauber sortiert oder durcheinander: alle Unterordner werden durchsucht, Kopien erkannt, die Teile jeder Aufnahme wieder zusammengesetzt.</p>
+        <button class="btn primary" id="pick">Ordner wählen…</button>
+        <p class="fine">Die Originale bleiben unangetastet. Das Ergebnis landet im Ordner <b>tracks</b>, verlustfrei als WAV.</p>
+      </div>
+    </section>
+
+    <section class="results merge-only" id="results" hidden>
+      <div class="summary" id="summary"></div>
+      <div class="listbar">
+        <label class="switch"><input type="checkbox" id="singles" checked><span>Einzelaufnahmen (nicht gestückelt) ebenfalls nach tracks kopieren</span></label>
+        <div class="listbar-right">
+          <button class="link" id="select-all">Alle</button>
+          <button class="link" id="select-none">Keine</button>
+        </div>
+      </div>
+      <div id="list" class="list"></div>
+      <details class="extras" id="extras" hidden>
+        <summary id="extras-summary"></summary>
+        <div id="extras-body"></div>
+      </details>
+    </section>
+    <section class="empty sync-only" id="sync-empty">
+      <div class="dropzone">
+        <svg class="illu" viewBox="0 0 320 96" aria-hidden="true">
+          <g class="frag"><rect x="8" y="14" width="96" height="24" rx="6"/><rect x="216" y="14" width="96" height="24" rx="6"/></g>
+          <g class="frag"><rect x="8" y="58" width="80" height="24" rx="6"/><rect x="232" y="58" width="80" height="24" rx="6"/></g>
+          <rect class="joint" x="112" y="10" width="96" height="76" rx="8"/>
+          <g class="whole"><rect x="120" y="20" width="4" height="12" rx="2"/><rect x="128" y="16" width="4" height="20" rx="2"/><rect x="136" y="22" width="4" height="8" rx="2"/><rect x="144" y="17" width="4" height="18" rx="2"/><rect x="152" y="21" width="4" height="10" rx="2"/><rect x="160" y="15" width="4" height="22" rx="2"/><rect x="168" y="20" width="4" height="12" rx="2"/><rect x="176" y="18" width="4" height="16" rx="2"/><rect x="184" y="22" width="4" height="8" rx="2"/><rect x="192" y="19" width="4" height="14" rx="2"/>
+          <rect x="120" y="64" width="4" height="12" rx="2"/><rect x="128" y="60" width="4" height="20" rx="2"/><rect x="136" y="66" width="4" height="8" rx="2"/><rect x="144" y="61" width="4" height="18" rx="2"/><rect x="152" y="65" width="4" height="10" rx="2"/><rect x="160" y="59" width="4" height="22" rx="2"/><rect x="168" y="64" width="4" height="12" rx="2"/><rect x="176" y="62" width="4" height="16" rx="2"/><rect x="184" y="66" width="4" height="8" rx="2"/><rect x="192" y="63" width="4" height="14" rx="2"/></g>
+        </svg>
+        <h2>Tracks hierher ziehen</h2>
+        <p>Die App sucht Ereignisse, die beide Mikrofone mit gleichbleibendem Zeitversatz hören: Silben, Stuhlrücken, Geschirr. Wo zwei Sender dasselbe Geschehen aufgenommen haben, entsteht eine Stereo-Datei. Wo die Mikros in verschiedenen Situationen waren, bleiben zwei Mono-Spuren.</p>
+        <button class="btn primary" id="sync-pick">Ordner wählen…</button>
+        <p class="fine">Am besten den Ordner <b>tracks</b> aus Schritt 1, rohe DJI-Ordner gehen auch. Ergebnis im Ordner <b>sync</b>, verlustfrei als WAV.</p>
+      </div>
+    </section>
+
+    <section class="results sync-only" id="sync-results" hidden>
+      <div class="summary" id="sync-summary"></div>
+      <div class="panel" id="sync-timeline"></div>
+      <div class="section-title">Track-Paare</div>
+      <div class="pairs" id="sync-pairs"></div>
+      <div class="listbar">
+        <div class="section-title flush">Ausgabe</div>
+        <div class="listbar-right">
+          <button class="link" id="sync-all">Alle</button>
+          <button class="link" id="sync-none">Keine</button>
+        </div>
+      </div>
+      <div class="list" id="sync-list"></div>
+      <details class="extras" id="sync-extras" hidden>
+        <summary id="sync-extras-summary"></summary>
+        <div id="sync-extras-body"></div>
+      </details>
+    </section>
+    <section class="empty master-only" id="master-empty">
+      <div class="dropzone">
+        <svg class="illu" viewBox="0 0 320 96" aria-hidden="true">
+          <g class="frag"><rect x="14" y="44" width="6" height="8" rx="3"/><rect x="26" y="40" width="6" height="16" rx="3"/><rect x="38" y="46" width="6" height="4" rx="2"/><rect x="50" y="30" width="6" height="36" rx="3"/><rect x="62" y="42" width="6" height="12" rx="3"/><rect x="74" y="45" width="6" height="6" rx="3"/><rect x="86" y="38" width="6" height="20" rx="3"/><rect x="98" y="44" width="6" height="8" rx="3"/><rect x="110" y="8" width="6" height="80" rx="3"/><rect x="122" y="43" width="6" height="10" rx="3"/></g>
+          <path class="arrow" d="M142 48h36m-10-9 10 9-10 9"/>
+          <line class="ceiling" x1="192" y1="16" x2="312" y2="16"/><line class="ceiling" x1="192" y1="80" x2="312" y2="80"/>
+          <g class="whole"><rect x="196" y="30" width="6" height="36" rx="3"/><rect x="208" y="22" width="6" height="52" rx="3"/><rect x="220" y="36" width="6" height="24" rx="3"/><rect x="232" y="18" width="6" height="60" rx="3"/><rect x="244" y="28" width="6" height="40" rx="3"/><rect x="256" y="34" width="6" height="28" rx="3"/><rect x="268" y="20" width="6" height="56" rx="3"/><rect x="280" y="30" width="6" height="36" rx="3"/><rect x="292" y="17" width="6" height="62" rx="3"/><rect x="304" y="32" width="6" height="32" rx="3"/></g>
+        </svg>
+        <h2>Audiodateien hierher ziehen</h2>
+        <p>Die App erkennt Format und Bittiefe jeder Datei, misst die Lautheit nach EBU R128 und bringt sie mit einer festen Verstärkung auf −16 LUFS. Ein Limiter fängt nur die Spitzen bei −1,5 dBTP ab, die Sprachdynamik bleibt.</p>
+        <button class="btn primary" id="master-pick">Ordner wählen…</button>
+        <p class="fine">Zum Beispiel den Ordner <b>sync</b> aus Schritt 2. Ergebnis im Ordner <b>master</b> als MP3 mit 192 kbit/s.</p>
+      </div>
+    </section>
+
+    <section class="results master-only" id="master-results" hidden>
+      <div class="summary" id="master-summary"></div>
+      <div class="listbar">
+        <div class="section-title flush">Dateien</div>
+        <div class="listbar-right">
+          <button class="link" id="master-all">Alle</button>
+          <button class="link" id="master-none">Keine</button>
+        </div>
+      </div>
+      <div class="list" id="master-list"></div>
+      <details class="extras" id="master-extras" hidden>
+        <summary id="master-extras-summary"></summary>
+        <div id="master-extras-body"></div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="bottom merge-only" id="bottom" hidden>
+    <div class="dest">
+      <span class="dest-label">Ziel</span>
+      <button class="dest-path" id="out-dir" title="Zielordner ändern"></button>
+    </div>
+    <div class="progress" id="progress" hidden>
+      <div class="bar"><i id="bar"></i></div>
+      <span id="ptext"></span>
+    </div>
+    <div class="done" id="done" hidden></div>
+    <div class="go">
+      <span class="sel" id="sel"></span>
+      <button class="btn" id="cancel" hidden>Abbrechen</button>
+      <button class="btn primary" id="go">Zusammenfügen</button>
+    </div>
+  </footer>
+
+  <footer class="bottom sync-only" id="sync-bottom" hidden>
+    <div class="dest">
+      <span class="dest-label">Ziel</span>
+      <button class="dest-path" id="sync-out-dir" title="Zielordner ändern"></button>
+    </div>
+    <div class="progress" id="sync-progress" hidden>
+      <div class="bar"><i id="sync-bar"></i></div>
+      <span id="sync-ptext"></span>
+    </div>
+    <div class="done" id="sync-done" hidden></div>
+    <div class="go">
+      <span class="sel" id="sync-sel"></span>
+      <button class="btn" id="sync-cancel" hidden>Abbrechen</button>
+      <button class="btn primary" id="sync-go">Erzeugen</button>
+    </div>
+  </footer>
+
+  <footer class="bottom master-only" id="master-bottom" hidden>
+    <div class="dest">
+      <span class="dest-label">Ziel</span>
+      <button class="dest-path" id="master-out-dir" title="Zielordner ändern"></button>
+    </div>
+    <div class="progress" id="master-progress" hidden>
+      <div class="bar"><i id="master-bar"></i></div>
+      <span id="master-ptext"></span>
+    </div>
+    <div class="done" id="master-done" hidden></div>
+    <div class="go">
+      <span class="sel" id="master-sel"></span>
+      <button class="btn" id="master-cancel" hidden>Abbrechen</button>
+      <button class="btn primary" id="master-go">Mastern</button>
+    </div>
+  </footer>
+
+  <div class="analyzing" id="master-analyzing" hidden>
+    <div class="card">
+      <div class="spinner"></div>
+      <div class="a-title">Messe Lautheit…</div>
+      <div class="bar wide"><i id="master-abar"></i></div>
+      <div class="a-text" id="master-atext">Suche Audiodateien</div>
+      <button class="btn" id="master-acancel">Abbrechen</button>
+    </div>
+  </div>
+
+  <div class="analyzing" id="sync-analyzing" hidden>
+    <div class="card">
+      <div class="spinner"></div>
+      <div class="a-title">Analysiere Tracks…</div>
+      <div class="bar wide"><i id="sync-abar"></i></div>
+      <div class="a-text" id="sync-atext">Suche Tracks</div>
+      <button class="btn" id="sync-acancel">Abbrechen</button>
+    </div>
+  </div>
+
+  <div class="modal" id="info" hidden>
+    <div class="modal-card" role="dialog" aria-labelledby="info-title">
+      <div class="modal-head">
+        <h2 id="info-title">PrepareAudio</h2>
+        <button class="btn ghost" id="info-close">Schließen</button>
+      </div>
+      <div class="modal-body">
+        <p class="lead" id="info-version">Version –</p>
+        <section>
+          <h3>Was die App macht</h3>
+          <ol class="steps">
+            <li><b>Zusammenfügen:</b> setzt die Teilstücke der DJI Mic 2 bitgenau zu ganzen WAV-Aufnahmen zusammen.</li>
+            <li><b>Synchronisieren:</b> findet gemeinsame Ereignisse mit gleichbleibendem Zeitversatz und schreibt gemeinsame Abschnitte als Stereo, parallele verschiedene Gespräche als Mono.</li>
+            <li><b>Mastern:</b> misst die Lautheit nach EBU R128 (ITU-R BS.1770-4), bringt sie mit fester Verstärkung auf −16 LUFS, begrenzt Spitzen bei −1,5 dBTP und schreibt MP3 mit 192 kbit/s.</li>
+          </ol>
+          <p class="fine-left">Alles läuft in der App selbst, ohne installierte Zusatzprogramme. Originaldateien werden nie verändert oder überschrieben.</p>
+        </section>
+        <section>
+          <h3>Lizenz</h3>
+          <p id="info-license">PrepareAudio steht unter der MIT-Lizenz.</p>
+          <details><summary>Lizenztext anzeigen</summary><pre id="info-license-text"></pre></details>
+        </section>
+        <section>
+          <h3>Enthaltene Software</h3>
+          <p id="info-third-intro">Lade Lizenzangaben…</p>
+          <div id="info-notes"></div>
+          <input class="search" id="info-filter" type="search" placeholder="Paket oder Lizenz suchen">
+          <div class="crate-table" id="info-crates"></div>
+          <details id="info-texts-wrap"><summary id="info-texts-summary">Alle Lizenztexte</summary><div id="info-texts"></div></details>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="overlay" hidden><div>Loslassen zum Durchsuchen</div></div>
+  <div class="scanning" id="scanning" hidden><div class="spinner"></div><span>Durchsuche Ordner…</span></div>
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="app.js"></script>
+  <script src="sync.js"></script>
+  <script src="master.js"></script>
+  <script src="info.js"></script>
+</body>
+</html>

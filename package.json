@@ -1,0 +1,16 @@
+{
+  "name": "prepareaudio",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "release": "python3 scripts/gen-licenses.py && env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID tauri build --bundles app && node scripts/notarize-app.mjs && node scripts/build-dmg.mjs && node scripts/notarize-dmg.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  },
+  "license": "MIT",
+  "author": "Ben Pohl"
+}
