@@ -68,7 +68,7 @@ Die App braucht dafür keine installierten Programme: Symphonia liest die Format
 
 ## Lizenz
 
-PrepareAudio ist freie Software unter der GNU Affero General Public License, Version 3 oder später (`LICENSE`), wie LocalTranscript und PrepareMedia. Copyright © 2026 B/IAS – Basel Institut für angewandte Stadtforschung, <https://bias.city/prepareaudio>. Quellcode: <https://github.com/BenPohlBasel/PrepareAudio>.
+PrepareAudio ist freie Software unter der GNU Affero General Public License, Version 3 oder später (`LICENSE`), wie LocalTranscript. Copyright © 2026 B/IAS – Basel Institut für angewandte Stadtforschung, <https://bias.city/prepareaudio>. Quellcode: <https://github.com/BenPohlBasel/PrepareAudio>.
 
 Die App enthält Software Dritter unter MIT, Apache-2.0, BSD, Zlib, Unicode, MPL-2.0 (Symphonia, Teile von Tauri) und LGPL (LAME über mp3lame-sys/mp3lame-encoder); alle sind mit der AGPL vereinbar. Die Lizenztexte stehen in `THIRD_PARTY_LICENSES.md`, im App-Paket unter `Contents/Resources` und im Info-Feld der App. Wer die App weitergibt, gibt den Empfängern auch den Quellcode (oder den Zugang dazu).
 
