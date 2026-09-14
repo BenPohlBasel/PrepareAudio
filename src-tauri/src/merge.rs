@@ -1,6 +1,7 @@
 //! Writes grouped recordings into the output folder: one gapless WAV per
 //! recording, audio bytes copied bit-exactly, never overwriting anything.
 
+use crate::i18n::{self, t, tf, Msg};
 use crate::scan::Recording;
 use crate::wav;
 use serde::Serialize;
@@ -23,6 +24,14 @@ pub struct Progress {
     pub done: u64,
     pub total: u64,
     pub milestone: bool,
+    /// Files currently in work and what happens to them.
+    pub active: Vec<Active>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Active {
+    pub id: usize,
+    pub stage: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
@@ -72,7 +81,7 @@ pub fn run<F: FnMut(&Progress)>(
     mut progress: F,
 ) -> Result<Summary, String> {
     fs::create_dir_all(out_dir)
-        .map_err(|e| format!("Zielordner {} kann nicht angelegt werden: {e}", out_dir.display()))?;
+        .map_err(|e| tf(Msg::CannotCreateDir, &[("path", &out_dir.display()), ("e", &e)]))?;
 
     let mut outcomes = Vec::new();
     let mut todo: Vec<(&Recording, PathBuf)> = Vec::new();
@@ -93,11 +102,7 @@ pub fn run<F: FnMut(&Progress)>(
     let need: u64 = todo.iter().map(|(r, _)| r.output_bytes).sum();
     if let Some(free) = available_bytes(out_dir) {
         if need > 0 && free < need + SPACE_MARGIN {
-            return Err(format!(
-                "Zu wenig Speicherplatz im Zielordner: benötigt {}, frei {}.",
-                human_bytes(need),
-                human_bytes(free)
-            ));
+            return Err(low_space(need, free));
         }
     }
 
@@ -115,7 +120,7 @@ pub fn run<F: FnMut(&Progress)>(
         let base = done;
         let result = {
             let mut report = |rec_done: u64, milestone: bool| {
-                progress(&Progress { index, count, id: rec.id, name: name.clone(), done: base + rec_done, total, milestone })
+                progress(&Progress { index, count, id: rec.id, name: name.clone(), done: base + rec_done, total, milestone, active: Vec::new() })
             };
             report(0, true);
             let r = write_recording(rec, target, cancel, &mut report);
@@ -156,7 +161,7 @@ fn resolve_target(out_dir: &Path, rec: &Recording, reserved: &mut HashSet<PathBu
             return Ok(Target::Existing(path));
         }
     }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "kein freier Dateiname im Zielordner"))
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, t(Msg::NoFreeNameInDir)))
 }
 
 /// An earlier run already wrote this recording (same format, length, and the
@@ -190,7 +195,7 @@ fn write_recording(
     let partial = target.with_file_name(format!("{file_name}.part"));
     let result = write_into(rec, &partial, cancel, report).and_then(|()| {
         if target.exists() {
-            return Err(WriteError::Io(format!("{} existiert inzwischen bereits", target.display())));
+            return Err(WriteError::Io(tf(Msg::ExistsMeanwhile, &[("path", &target.display())])));
         }
         fs::rename(&partial, target).map_err(WriteError::from)
     });
@@ -214,7 +219,7 @@ fn write_into(
     for (k, part) in rec.parts.iter().enumerate() {
         let mut src = File::open(&part.path_buf)?;
         if src.metadata()?.len() != part.info.file_size {
-            return Err(WriteError::Io(format!("Teil {} wurde seit dem Scan verändert: {}", k + 1, part.path)));
+            return Err(WriteError::Io(tf(Msg::ChunkChanged, &[("n", &(k + 1)), ("path", &part.path)])));
         }
         src.seek(SeekFrom::Start(part.info.data_offset))?;
         let mut remaining = part.info.data_len;
@@ -238,7 +243,7 @@ fn write_into(
 
     let check = wav::read_info(path)?;
     if check.repaired || check.data_len != rec.data_bytes || check.fmt != fmt || check.file_size != rec.output_bytes {
-        return Err(WriteError::Io("Kontrolle der geschriebenen Datei fehlgeschlagen".into()));
+        return Err(WriteError::Io(t(Msg::VerifyFailed).into()));
     }
     Ok(())
 }
@@ -260,19 +265,14 @@ pub fn available_bytes(_path: &Path) -> Option<u64> {
     None
 }
 
+/// Byte count in the current language ("1,5 GB").
 pub fn human_bytes(b: u64) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = b as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < units.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i >= 2 {
-        format!("{v:.1} {}", units[i])
-    } else {
-        format!("{v:.0} {}", units[i])
-    }
+    i18n::bytes(i18n::current(), b)
+}
+
+/// "Not enough space in the destination folder" with both sizes, in the current language.
+pub fn low_space(need: u64, free: u64) -> String {
+    tf(Msg::LowSpace, &[("need", &human_bytes(need)), ("free", &human_bytes(free))])
 }
 
 #[cfg(test)]

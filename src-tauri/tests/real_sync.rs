@@ -1,7 +1,7 @@
 //! Read-only check of the sync analysis against real tracks (not run by default).
 //!
-//!   DJI_SYNC_DIR="/path/tracks" cargo test --release --test real_sync -- --ignored --nocapture
-//!   optional: DJI_SYNC_JSON=/tmp/plan.json, DJI_SYNC_OUT=/tmp/out DJI_SYNC_MATCH=stereo
+//!   PA_SYNC_DIR="/path/tracks" cargo test --release --test real_sync -- --ignored --nocapture
+//!   optional: PA_SYNC_JSON=/tmp/plan.json, PA_SYNC_OUT=/tmp/out PA_SYNC_MATCH=stereo
 
 use prepare_audio_lib::sync;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ fn hms(sec: f64) -> String {
 #[test]
 #[ignore]
 fn real_sync() {
-    let dirs: Vec<PathBuf> = std::env::var("DJI_SYNC_DIR").expect("DJI_SYNC_DIR").split('|').map(PathBuf::from).collect();
+    let dirs: Vec<PathBuf> = std::env::var("PA_SYNC_DIR").expect("PA_SYNC_DIR").split('|').map(PathBuf::from).collect();
     let t = std::time::Instant::now();
     let plan = sync::analyze(&dirs, &AtomicBool::new(false), &mut |_| {}).unwrap();
     println!(
@@ -52,10 +52,10 @@ fn real_sync() {
     for it in &plan.items {
         println!("ITEM {:>3} {:6} {:9} {} {}–{} {:>8.1}s {}", it.id, it.kind, it.reason, it.day, it.start, it.end, it.duration, it.name);
     }
-    if let Ok(json) = std::env::var("DJI_SYNC_JSON") {
+    if let Ok(json) = std::env::var("PA_SYNC_JSON") {
         std::fs::write(&json, serde_json::to_string(&plan).unwrap()).unwrap();
     }
-    if let (Ok(out), Ok(pat)) = (std::env::var("DJI_SYNC_OUT"), std::env::var("DJI_SYNC_MATCH")) {
+    if let (Ok(out), Ok(pat)) = (std::env::var("PA_SYNC_OUT"), std::env::var("PA_SYNC_MATCH")) {
         let ids: Vec<usize> = plan.items.iter().filter(|i| i.name.contains(&pat)).map(|i| i.id).collect();
         let t = std::time::Instant::now();
         let sum = sync::write(&plan, &ids, Path::new(&out), &AtomicBool::new(false), |_| {}).unwrap();

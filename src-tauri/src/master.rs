@@ -10,26 +10,21 @@
 //! einkompiliert ist. Nach dem Kodieren wird das MP3 nachgemessen und die
 //! Verstärkung notfalls nachgeregelt, bis es höchstens 0,3 LU vom Ziel abweicht.
 
-use crate::merge::{available_bytes, human_bytes, Progress, Status};
+use crate::decode::{container, extension, open_reader, Details, SymReader, AUDIO_EXT};
+use crate::i18n::{self, t, tf, Lang, Msg};
+use crate::merge::{available_bytes, low_space, Active, Progress, Status};
 use crate::scan::Skipped;
 use crate::sync::{self, SyncProgress};
-use crate::wav::{self, WavInfo};
+use crate::wav;
 use ebur128::{EbuR128, Mode as R128};
-use mp3lame_encoder::{Bitrate, Builder, FlushNoGap, Id3Tag, InterleavedPcm, Mode as LameMode, MonoPcm, Quality, VbrMode};
+use mp3lame_encoder::{Bitrate, Builder, FlushGap, Id3Tag, InterleavedPcm, Mode as LameMode, MonoPcm, Quality, VbrMode};
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::errors::Error as SymError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 pub const OUTPUT_DIR_NAME: &str = "master";
 pub const TARGET_LUFS: f64 = -16.0;
@@ -53,8 +48,6 @@ const W_ENCODE: f64 = 1.0;
 const W_CHECK: f64 = 0.3;
 const ATTACK_S: f64 = 0.005;
 const RELEASE_S: f64 = 0.05;
-const CANCELLED: &str = "Abgebrochen.";
-const AUDIO_EXT: [&str; 11] = ["wav", "wave", "mp3", "m4a", "mp4", "aac", "flac", "aif", "aiff", "ogg", "caf"];
 const MP3_RATES: [u32; 9] = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000];
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,187 +115,6 @@ pub struct MasterSummary {
     pub cancelled: bool,
 }
 
-// ------------------------------------------------------------------ decoding
-
-trait AudioReader {
-    fn channels(&self) -> usize;
-    fn rate(&self) -> u32;
-    /// Appends the next block of interleaved samples; false at the end.
-    fn read(&mut self, out: &mut Vec<f32>) -> Result<bool, String>;
-}
-
-struct Details {
-    codec: String,
-    bits: Option<u32>,
-}
-
-struct WavReader {
-    info: WavInfo,
-    file: File,
-    remaining: u64,
-    buf: Vec<u8>,
-}
-
-impl WavReader {
-    fn open(path: &Path) -> Result<(Self, Details), String> {
-        let info = wav::read_info(path).map_err(|e| e.to_string())?;
-        let kind = info.sample_kind().ok_or("WAV-Format wird nicht unterstützt")?;
-        let mut file = File::open(path).map_err(|e| e.to_string())?;
-        file.seek(SeekFrom::Start(info.data_offset)).map_err(|e| e.to_string())?;
-        let bits = (info.block_align / info.channels.max(1)) as u32 * 8;
-        let codec = match kind {
-            wav::SampleKind::F32 | wav::SampleKind::F64 => format!("pcm_f{bits}le"),
-            wav::SampleKind::U8 => "pcm_u8".to_string(),
-            _ => format!("pcm_s{bits}le"),
-        };
-        let details = Details { codec, bits: Some(bits) };
-        let buf = vec![0u8; info.block_align as usize * 16384];
-        Ok((WavReader { remaining: info.data_len, file, buf, info }, details))
-    }
-}
-
-impl AudioReader for WavReader {
-    fn channels(&self) -> usize {
-        self.info.channels as usize
-    }
-    fn rate(&self) -> u32 {
-        self.info.sample_rate
-    }
-    fn read(&mut self, out: &mut Vec<f32>) -> Result<bool, String> {
-        if self.remaining == 0 {
-            return Ok(false);
-        }
-        let kind = self.info.sample_kind().ok_or("WAV-Format wird nicht unterstützt")?;
-        let bps = (self.info.block_align / self.info.channels.max(1)) as usize;
-        let n = (self.buf.len() as u64).min(self.remaining) as usize;
-        self.file.read_exact(&mut self.buf[..n]).map_err(|e| format!("Lesefehler: {e}"))?;
-        self.remaining -= n as u64;
-        out.reserve(n / bps);
-        out.extend(self.buf[..n].chunks_exact(bps).map(|s| wav::decode_sample(s, kind) as f32));
-        Ok(true)
-    }
-}
-
-struct SymReader {
-    format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
-    track: u32,
-    sample_buf: Option<SampleBuffer<f32>>,
-    channels: usize,
-    rate: u32,
-    pending: Vec<f32>,
-    done: bool,
-}
-
-impl SymReader {
-    fn open(path: &Path, ext: &str) -> Result<(Self, Details), String> {
-        let file = File::open(path).map_err(|e| e.to_string())?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut hint = Hint::new();
-        if !ext.is_empty() {
-            hint.with_extension(ext);
-        }
-        let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-            .map_err(|_| "Format wird nicht unterstützt".to_string())?;
-        let format = probed.format;
-        let track = format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).ok_or("keine Audiospur")?;
-        let (track_id, params) = (track.id, track.codec_params.clone());
-        let registry = symphonia::default::get_codecs();
-        let decoder = registry.make(&params, &DecoderOptions::default()).map_err(|_| "Codec wird nicht unterstützt".to_string())?;
-        let codec = registry.get_codec(params.codec).map(|d| d.short_name.to_string()).unwrap_or_default();
-        let mut reader = SymReader {
-            format,
-            decoder,
-            track: track_id,
-            sample_buf: None,
-            channels: params.channels.map_or(0, |c| c.count()),
-            rate: params.sample_rate.unwrap_or(0),
-            pending: Vec::new(),
-            done: false,
-        };
-        // The first packet tells channel count and rate reliably for every codec.
-        let mut first = Vec::new();
-        if !reader.decode_next(&mut first)? {
-            reader.done = true;
-        }
-        reader.pending = first;
-        Ok((reader, Details { codec, bits: params.bits_per_sample }))
-    }
-
-    fn decode_next(&mut self, out: &mut Vec<f32>) -> Result<bool, String> {
-        loop {
-            let packet = match self.format.next_packet() {
-                Ok(p) => p,
-                Err(SymError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
-                Err(SymError::ResetRequired) => return Ok(false),
-                Err(e) => return Err(format!("Lesefehler: {e}")),
-            };
-            if packet.track_id() != self.track {
-                continue;
-            }
-            match self.decoder.decode(&packet) {
-                Ok(decoded) => {
-                    if decoded.frames() == 0 {
-                        continue;
-                    }
-                    let spec = *decoded.spec();
-                    self.channels = spec.channels.count();
-                    self.rate = spec.rate;
-                    let capacity = decoded.capacity();
-                    if self.sample_buf.as_ref().map_or(true, |b| b.capacity() < capacity) {
-                        self.sample_buf = Some(SampleBuffer::<f32>::new(capacity as u64, spec));
-                    }
-                    let sb = self.sample_buf.as_mut().expect("sample buffer");
-                    sb.copy_interleaved_ref(decoded);
-                    out.extend_from_slice(sb.samples());
-                    return Ok(true);
-                }
-                Err(SymError::DecodeError(_)) => continue,
-                Err(e) => return Err(format!("Dekodierfehler: {e}")),
-            }
-        }
-    }
-}
-
-impl AudioReader for SymReader {
-    fn channels(&self) -> usize {
-        self.channels
-    }
-    fn rate(&self) -> u32 {
-        self.rate
-    }
-    fn read(&mut self, out: &mut Vec<f32>) -> Result<bool, String> {
-        if !self.pending.is_empty() {
-            out.append(&mut self.pending);
-            return Ok(true);
-        }
-        if self.done {
-            return Ok(false);
-        }
-        let more = self.decode_next(out)?;
-        self.done = !more;
-        Ok(more)
-    }
-}
-
-fn open_reader(path: &Path, ext: &str) -> Result<(Box<dyn AudioReader>, Details), String> {
-    if ext == "wav" || ext == "wave" {
-        if let Ok((r, d)) = WavReader::open(path) {
-            return Ok((Box::new(r), d));
-        }
-    }
-    let (r, d) = SymReader::open(path, ext)?;
-    if r.channels == 0 || r.rate == 0 {
-        return Err("enthält keine Audiodaten".into());
-    }
-    Ok((Box::new(r), d))
-}
-
-fn extension(path: &Path) -> String {
-    path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
-}
-
 // ------------------------------------------------------------------ loudness
 
 struct Measured {
@@ -316,7 +128,7 @@ struct Measured {
 fn measure(path: &Path, ext: &str, cancel: &AtomicBool, on_frames: &mut dyn FnMut(u64)) -> Result<Measured, String> {
     let (mut reader, details) = open_reader(path, ext)?;
     let (ch, rate) = (reader.channels(), reader.rate());
-    let mut meter = EbuR128::new(ch as u32, rate, R128::I | R128::LRA | R128::TRUE_PEAK).map_err(|e| format!("Lautheitsmessung: {e:?}"))?;
+    let mut meter = EbuR128::new(ch as u32, rate, R128::I | R128::LRA | R128::TRUE_PEAK).map_err(|e| loudness_err(e))?;
     let mut buf = Vec::new();
     let mut frames = 0u64;
     loop {
@@ -325,10 +137,10 @@ fn measure(path: &Path, ext: &str, cancel: &AtomicBool, on_frames: &mut dyn FnMu
             break;
         }
         if cancel.load(Ordering::Relaxed) {
-            return Err(CANCELLED.into());
+            return Err(i18n::cancelled());
         }
         let whole = buf.len() - buf.len() % ch;
-        meter.add_frames_f32(&buf[..whole]).map_err(|e| format!("Lautheitsmessung: {e:?}"))?;
+        meter.add_frames_f32(&buf[..whole]).map_err(|e| loudness_err(e))?;
         frames += (whole / ch) as u64;
         on_frames(frames);
     }
@@ -499,6 +311,10 @@ impl Decimator {
     }
 }
 
+fn loudness_err(e: impl std::fmt::Debug) -> String {
+    tf(Msg::LoudnessMeasurement, &[("e", &format!("{e:?}"))])
+}
+
 fn mp3_rate(rate: u32) -> Result<(u32, usize), String> {
     if MP3_RATES.contains(&rate) {
         return Ok((rate, 1));
@@ -508,7 +324,7 @@ fn mp3_rate(rate: u32) -> Result<(u32, usize), String> {
             return Ok((rate / factor, factor as usize));
         }
     }
-    Err(format!("Abtastrate {rate} Hz wird für MP3 nicht unterstützt"))
+    Err(tf(Msg::RateUnsupportedMp3, &[("rate", &rate)]))
 }
 
 // ------------------------------------------------------------------ analysis
@@ -561,29 +377,18 @@ fn default_out_dir(roots: &[PathBuf]) -> PathBuf {
     common.join(OUTPUT_DIR_NAME)
 }
 
-fn khz(sr: u32) -> String {
-    let k = sr as f64 / 1000.0;
-    if k.fract() == 0.0 {
-        format!("{} kHz", k as u64)
-    } else {
-        format!("{} kHz", format!("{k:.1}").replace('.', ","))
-    }
+/// "WAV · 32-bit float · 48 kHz · Stereo" in `lang` (empty parts left out).
+fn format_line(lang: Lang, container: &str, detail: &str, rate: u32, channels: usize) -> String {
+    [container.to_string(), detail.to_string(), i18n::khz(lang, rate), i18n::channels(lang, channels as u32)]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Container, codec detail, bit depth and float flag in plain words.
 fn describe(ext: &str, codec: &str, bits: Option<u32>, bit_rate: Option<u64>) -> (String, String, Option<u32>, bool) {
-    let container = match ext {
-        "wav" | "wave" => "WAV",
-        "mp3" => "MP3",
-        "m4a" | "mp4" => "M4A",
-        "aac" => "AAC",
-        "flac" => "FLAC",
-        "aif" | "aiff" => "AIFF",
-        "ogg" => "OGG",
-        "caf" => "CAF",
-        _ => "Audio",
-    }
-    .to_string();
+    let container = container(ext).to_string();
     if let Some(rest) = codec.strip_prefix("pcm_") {
         let float = rest.starts_with('f');
         let b: Option<u32> = rest.chars().filter(char::is_ascii_digit).collect::<String>().parse().ok().or(bits);
@@ -617,8 +422,20 @@ fn describe(ext: &str, codec: &str, bits: Option<u32>, bit_rate: Option<u64>) ->
     (container, parts.join(" "), if lossless { bits } else { None }, false)
 }
 
+/// WAV files that step 1 would join with others into one recording (raw chunks,
+/// any recorder). Merged tracks and single recordings are not chunks.
+fn chunk_paths(files: &[PathBuf]) -> HashSet<PathBuf> {
+    let wavs: Vec<PathBuf> = files.iter().filter(|p| extension(p) == "wav").cloned().collect();
+    if wavs.is_empty() {
+        return HashSet::new();
+    }
+    crate::scan::scan(&wavs, &crate::scan::Options::default())
+        .map(|s| s.recordings.into_iter().filter(|r| r.parts.len() > 1).flat_map(|r| r.parts).map(|p| p.path_buf).collect())
+        .unwrap_or_default()
+}
+
 pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(&SyncProgress)) -> Result<MasterPlan, String> {
-    progress(&SyncProgress { stage: "load", done: 0, total: 1, text: "Suche Audiodateien".into() });
+    progress(&SyncProgress { stage: "load", done: 0, total: 1, text: t(Msg::ProgressFindAudio).into() });
     let mut roots: Vec<PathBuf> = Vec::new();
     let mut files = Vec::new();
     let mut ignored = Vec::new();
@@ -638,18 +455,19 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
             if is_audio(input) {
                 files.push(input.clone());
             } else {
-                ignored.push(Skipped { path: input.display().to_string(), reason: "keine unterstützte Audiodatei".into() });
+                ignored.push(Skipped { path: input.display().to_string(), reason: t(Msg::NotSupportedAudioFile).into() });
             }
         }
     }
     if roots.is_empty() {
-        return Err("Keine Ordner oder Dateien angegeben.".into());
+        return Err(t(Msg::NoFoldersOrFiles).into());
     }
     files.sort();
     files.dedup();
     if files.is_empty() {
-        return Err("Keine Audiodateien gefunden (WAV, MP3, M4A, AAC, FLAC, AIFF, CAF, OGG).".into());
+        return Err(t(Msg::NoAudioFilesFound).into());
     }
+    let chunks = chunk_paths(&files);
 
     let sizes: Vec<u64> = files.iter().map(|p| fs::metadata(p).map_or(0, |m| m.len())).collect();
     let total: u64 = sizes.iter().sum::<u64>().max(1);
@@ -661,7 +479,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
             &jobs,
             &mut || {
                 let d: u64 = done.iter().map(|x| x.load(Ordering::Relaxed)).sum();
-                progress(&SyncProgress { stage: "measure", done: d.min(total), total, text: "Lautheit messen (EBU R128)".into() })
+                progress(&SyncProgress { stage: "measure", done: d.min(total), total, text: t(Msg::ProgressMeasure).into() })
             },
             &|&i: &usize| {
                 let path = &files[i];
@@ -679,7 +497,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         )
     };
     if cancel.load(Ordering::SeqCst) {
-        return Err(CANCELLED.into());
+        return Err(i18n::cancelled());
     }
 
     let mut names: HashSet<String> = HashSet::new();
@@ -688,7 +506,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         let m = match m {
             Some(Ok(m)) if m.frames > 0 => m,
             Some(Ok(_)) => {
-                ignored.push(Skipped { path: path.display().to_string(), reason: "enthält keine Audiodaten".into() });
+                ignored.push(Skipped { path: path.display().to_string(), reason: t(Msg::NoAudioData).into() });
                 continue;
             }
             Some(Err(e)) => {
@@ -696,7 +514,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
                 continue;
             }
             None => {
-                ignored.push(Skipped { path: path.display().to_string(), reason: "nicht lesbar".into() });
+                ignored.push(Skipped { path: path.display().to_string(), reason: t(Msg::Unreadable).into() });
                 continue;
             }
         };
@@ -706,18 +524,13 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         let lossy = !m.details.codec.starts_with("pcm_") && !matches!(m.details.codec.as_str(), "flac" | "alac");
         let bit_rate = (lossy && duration > 0.0).then(|| (size as f64 * 8.0 / duration) as u64);
         let (container, detail, bits, float) = describe(&ext, &m.details.codec, m.details.bits, bit_rate);
-        let channels = match m.channels {
-            1 => "Mono".to_string(),
-            2 => "Stereo".to_string(),
-            n => format!("{n} Kanäle"),
-        };
-        let format = [container.clone(), detail, khz(m.rate), channels].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        let format = format_line(i18n::current(), &container, &detail, m.rate, m.channels);
         let l = m.loudness;
         let (mut gain_db, mut limited_db, mut note) = (None, 0.0, None);
         if l.lufs.is_finite() && l.lufs > -70.0 {
             let g = TARGET_LUFS - l.lufs;
             if g > MAX_GAIN_DB {
-                note = Some(format!("sehr leise, Verstärkung auf +{MAX_GAIN_DB:.0} dB begrenzt"));
+                note = Some(tf(Msg::NoteVeryQuiet, &[("max", &format!("{MAX_GAIN_DB:.0}"))]));
             }
             let g = g.min(MAX_GAIN_DB);
             if l.true_peak.is_finite() {
@@ -725,7 +538,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
             }
             gain_db = Some(g);
         } else {
-            note = Some("Stille, keine Lautheit messbar".into());
+            note = Some(t(Msg::NoteSilence).into());
         }
         if let Err(e) = mp3_rate(m.rate) {
             note = Some(e);
@@ -742,7 +555,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
             id: out.len(),
             path: path.display().to_string(),
             folder: path.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            dji_part: crate::scan::parse_dji_name(&name).is_some() && sync::parse_track_name(&name).is_none(),
+            dji_part: chunks.contains(&path),
             name,
             format,
             container,
@@ -763,7 +576,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         });
     }
     if out.is_empty() {
-        return Err("Keine lesbaren Audiodateien gefunden.".into());
+        return Err(t(Msg::NoReadableAudio).into());
     }
     Ok(MasterPlan {
         default_out_dir: default_out_dir(&roots).display().to_string(),
@@ -780,7 +593,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
 // ------------------------------------------------------------------ writing
 
 fn lame_err<E>(_: E) -> String {
-    "MP3-Encoder: Einstellung nicht möglich".to_string()
+    t(Msg::EncoderSetting).to_string()
 }
 
 /// Progress of one file across all its passes, in weighted milliseconds of audio.
@@ -844,7 +657,7 @@ fn render(
         input.clear();
         let more = reader.read(&mut input)?;
         if cancel.load(Ordering::Relaxed) {
-            return Err(CANCELLED.into());
+            return Err(i18n::cancelled());
         }
         limited.clear();
         if more {
@@ -880,13 +693,13 @@ fn render(
 /// (loudness only: the true peak is judged on the finished MP3).
 fn measure_render(f: &AudioFile, gain_db: f64, ceiling_db: f64, cancel: &AtomicBool, on_secs: &mut dyn FnMut(f64)) -> Result<f64, String> {
     let (ch, rate) = layout(f)?;
-    let mut meter = EbuR128::new(ch as u32, rate, R128::I).map_err(|e| format!("Lautheitsmessung: {e:?}"))?;
-    render(f, gain_db, ceiling_db, cancel, on_secs, &mut |pcm| meter.add_frames_f32(pcm).map_err(|e| format!("Lautheitsmessung: {e:?}")))?;
+    let mut meter = EbuR128::new(ch as u32, rate, R128::I).map_err(|e| loudness_err(e))?;
+    render(f, gain_db, ceiling_db, cancel, on_secs, &mut |pcm| meter.add_frames_f32(pcm).map_err(|e| loudness_err(e)))?;
     Ok(meter.loudness_global().unwrap_or(f64::NEG_INFINITY))
 }
 
 fn debug(f: &AudioFile, msg: String) {
-    if std::env::var_os("DJI_MASTER_DEBUG").is_some() {
+    if std::env::var_os("PA_MASTER_DEBUG").is_some() {
         eprintln!("[master] {}: {msg}", f.name);
     }
 }
@@ -894,7 +707,7 @@ fn debug(f: &AudioFile, msg: String) {
 fn encode(f: &AudioFile, out_path: &Path, gain_db: f64, ceiling_db: f64, cancel: &AtomicBool, on_secs: &mut dyn FnMut(f64)) -> Result<(), String> {
     let (out_ch, out_rate) = layout(f)?;
     let stem = Path::new(&f.out_name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut b = Builder::new().ok_or("MP3-Encoder nicht verfügbar")?;
+    let mut b = Builder::new().ok_or(t(Msg::EncoderUnavailable))?;
     b.set_num_channels(out_ch as u8).map_err(lame_err)?;
     b.set_sample_rate(out_rate).map_err(lame_err)?;
     b.set_vbr_mode(VbrMode::Off).map_err(lame_err)?;
@@ -916,14 +729,14 @@ fn encode(f: &AudioFile, out_path: &Path, gain_db: f64, ceiling_db: f64, cancel:
         } else {
             encoder.encode(InterleavedPcm(pcm), mp3.spare_capacity_mut())
         }
-        .map_err(|_| "MP3-Kodierung fehlgeschlagen".to_string())?;
+        .map_err(|_| t(Msg::EncodingFailed).to_string())?;
         // SAFETY: the encoder initialised the first `n` bytes of the spare capacity.
         unsafe { mp3.set_len(n) };
         file.write_all(&mp3).map_err(|e| e.to_string())
     })?;
     mp3.clear();
     mp3.reserve(7200);
-    let n = encoder.flush::<FlushNoGap>(mp3.spare_capacity_mut()).map_err(|_| "MP3-Kodierung fehlgeschlagen".to_string())?;
+    let n = encoder.flush::<FlushGap>(mp3.spare_capacity_mut()).map_err(|_| t(Msg::EncodingFailed).to_string())?;
     // SAFETY: as above.
     unsafe { mp3.set_len(n) };
     file.write_all(&mp3).map_err(|e| e.to_string())?;
@@ -938,7 +751,7 @@ fn encode(f: &AudioFile, out_path: &Path, gain_db: f64, ceiling_db: f64, cancel:
 /// if the MP3 is still off (more than 0.3 LU, or MP3 peaks above −1.5 dBTP
 /// + 0.1 dB) the search repeats with the correction and encodes again.
 fn encode_to_target(f: &AudioFile, part: &Path, cancel: &AtomicBool, work: &Work, stage: &dyn Fn(&str)) -> Result<Loudness, String> {
-    let mut gain = f.gain_db.ok_or("keine messbare Lautheit")?;
+    let mut gain = f.gain_db.ok_or(t(Msg::NoMeasurableLoudness))?;
     let mut ceiling = CEILING_DBTP - CODEC_MARGIN_DB;
     // Loudness the PCM must reach so that the MP3 lands on the target; MP3's
     // low-pass can take away a little of the (K-weighted) treble energy.
@@ -947,7 +760,7 @@ fn encode_to_target(f: &AudioFile, part: &Path, cancel: &AtomicBool, work: &Work
     for round in 0..3 {
         let mut tries: Vec<(f64, f64)> = Vec::new();
         for _ in 0..5 {
-            stage("Pegel einstellen");
+            stage(i18n::t(Msg::StageLevel));
             work.begin(W_SEARCH, W_ENCODE + W_CHECK);
             let t = std::time::Instant::now();
             let lufs = measure_render(f, gain, ceiling, cancel, &mut |secs| work.advance(secs, W_SEARCH))?;
@@ -968,13 +781,13 @@ fn encode_to_target(f: &AudioFile, part: &Path, cancel: &AtomicBool, work: &Work
             }
             gain = next;
         }
-        stage("MP3 kodieren");
+        stage(i18n::t(Msg::StageEncode));
         work.begin(W_ENCODE, W_CHECK);
         let t = std::time::Instant::now();
         encode(f, part, gain, ceiling, cancel, &mut |secs| work.advance(secs, W_ENCODE))?;
         work.end(W_ENCODE);
         debug(f, format!("encode ({:.1?})", t.elapsed()));
-        stage("Nachmessen");
+        stage(i18n::t(Msg::StageCheck));
         work.begin(W_CHECK, 0.0);
         let rate = f.sample_rate as f64;
         let t = std::time::Instant::now();
@@ -996,7 +809,7 @@ fn encode_to_target(f: &AudioFile, part: &Path, cancel: &AtomicBool, work: &Work
             pcm_target += err;
         }
     }
-    last.ok_or_else(|| "keine Messung".to_string())
+    last.ok_or_else(|| t(Msg::NoMeasurement).to_string())
 }
 
 fn master_one(f: &AudioFile, target: &Path, cancel: &AtomicBool, work: &Work, stage: &dyn Fn(&str)) -> Result<Loudness, String> {
@@ -1004,7 +817,7 @@ fn master_one(f: &AudioFile, target: &Path, cancel: &AtomicBool, work: &Work, st
     let part = target.with_file_name(format!(".{name}.part"));
     let result = encode_to_target(f, &part, cancel, work, stage).and_then(|l| {
         if target.exists() {
-            return Err(format!("{} existiert inzwischen bereits", target.display()));
+            return Err(tf(Msg::ExistsMeanwhile, &[("path", &target.display())]));
         }
         fs::rename(&part, target).map_err(|e| e.to_string())?;
         Ok(l)
@@ -1017,7 +830,7 @@ fn master_one(f: &AudioFile, target: &Path, cancel: &AtomicBool, work: &Work, st
 
 /// An MP3 of about the same length at the target path counts as an earlier result.
 fn same_mp3(path: &Path, duration: f64) -> bool {
-    let Ok((_, details)) = SymReader::open(path, "mp3") else { return false };
+    let Ok((_, details)) = SymReader::open(path, "mp3", false) else { return false };
     if details.codec != "mp3" {
         return false;
     }
@@ -1045,50 +858,61 @@ fn resolve(out_dir: &Path, f: &AudioFile, reserved: &mut HashSet<PathBuf>) -> Op
 }
 
 pub fn write<F: FnMut(&Progress)>(plan: &MasterPlan, ids: &[usize], out_dir: &Path, cancel: &AtomicBool, mut progress: F) -> Result<MasterSummary, String> {
-    fs::create_dir_all(out_dir).map_err(|e| format!("Zielordner {} kann nicht angelegt werden: {e}", out_dir.display()))?;
+    fs::create_dir_all(out_dir).map_err(|e| tf(Msg::CannotCreateDir, &[("path", &out_dir.display()), ("e", &e)]))?;
     let mut outcomes = Vec::new();
     let mut todo: Vec<(usize, &AudioFile, PathBuf)> = Vec::new();
     let mut reserved = HashSet::new();
     for f in plan.files.iter().filter(|f| ids.contains(&f.id)) {
         if f.gain_db.is_none() {
-            let msg = f.note.clone().unwrap_or_else(|| "keine messbare Lautheit".into());
+            let msg = f.note.clone().unwrap_or_else(|| t(Msg::NoMeasurableLoudness).into());
             outcomes.push(MasterOutcome { id: f.id, status: Status::Failed, path: None, message: Some(msg), result: None });
             continue;
         }
         match resolve(out_dir, f, &mut reserved) {
             Some((p, true)) => outcomes.push(MasterOutcome { id: f.id, status: Status::Existing, path: Some(p.display().to_string()), message: None, result: None }),
             Some((p, false)) => todo.push((todo.len(), f, p)),
-            None => outcomes.push(MasterOutcome { id: f.id, status: Status::Failed, path: None, message: Some("kein freier Dateiname".into()), result: None }),
+            None => outcomes.push(MasterOutcome { id: f.id, status: Status::Failed, path: None, message: Some(t(Msg::NoFreeName).into()), result: None }),
         }
     }
     let need: u64 = todo.iter().map(|(_, f, _)| (f.duration * BITRATE_KBPS as f64 * 125.0) as u64 + 65_536).sum();
     if let Some(free) = available_bytes(out_dir) {
         if !todo.is_empty() && free < need + (64 << 20) {
-            return Err(format!("Zu wenig Speicherplatz im Zielordner: benötigt {}, frei {}.", human_bytes(need), human_bytes(free)));
+            return Err(low_space(need, free));
         }
     }
     let works: Vec<Work> = todo.iter().map(|(_, f, _)| Work::new(f.duration)).collect();
+    let durations: Vec<u64> = todo.iter().map(|(_, f, _)| (f.duration * 1000.0) as u64).collect();
     let finished = AtomicUsize::new(0);
-    let current = Mutex::new((0usize, String::new()));
+    let finished_ms = AtomicU64::new(0);
+    let stages: Mutex<Vec<Active>> = Mutex::new(Vec::new());
     let count = todo.len();
     let results = {
-        let (works, finished, current) = (&works, &finished, &current);
+        let (works, finished, finished_ms, stages, durations) = (&works, &finished, &finished_ms, &stages, &durations);
         sync::run_parallel(
             &todo,
             &mut || {
-                let total: u64 = works.iter().map(|w| w.total.load(Ordering::Relaxed)).sum::<u64>().max(1);
-                let done: u64 = works.iter().map(|w| w.done.load(Ordering::Relaxed)).sum();
-                let (id, name) = current.lock().map(|c| c.clone()).unwrap_or_default();
-                progress(&Progress { index: finished.load(Ordering::Relaxed), count, id, name, done: done.min(total), total, milestone: false });
+                // Honest progress: only finished files count; the stage of the rest is shown as text.
+                let total: u64 = durations.iter().sum::<u64>().max(1);
+                let active = stages.lock().map(|s| s.clone()).unwrap_or_default();
+                let (id, name) = active.first().map(|a| (a.id, a.stage.clone())).unwrap_or_default();
+                let done = finished_ms.load(Ordering::Relaxed).min(total);
+                progress(&Progress { index: finished.load(Ordering::Relaxed), count, id, name, done, total, milestone: false, active });
             },
             &|(i, f, target): &(usize, &AudioFile, PathBuf)| {
                 let stage = |what: &str| {
-                    if let Ok(mut c) = current.lock() {
-                        *c = (f.id, format!("{} · {what}", f.out_name));
+                    if let Ok(mut s) = stages.lock() {
+                        match s.iter_mut().find(|a| a.id == f.id) {
+                            Some(a) => a.stage = what.to_string(),
+                            None => s.push(Active { id: f.id, stage: what.to_string() }),
+                        }
                     }
                 };
                 let r = master_one(f, target, cancel, &works[*i], &stage);
+                if let Ok(mut s) = stages.lock() {
+                    s.retain(|a| a.id != f.id);
+                }
                 finished.fetch_add(1, Ordering::Relaxed);
+                finished_ms.fetch_add(durations[*i], Ordering::Relaxed);
                 works[*i].finish();
                 r
             },
@@ -1097,9 +921,9 @@ pub fn write<F: FnMut(&Progress)>(plan: &MasterPlan, ids: &[usize], out_dir: &Pa
     for ((_, f, target), r) in todo.iter().zip(results) {
         outcomes.push(match r {
             Some(Ok(l)) => MasterOutcome { id: f.id, status: Status::Written, path: Some(target.display().to_string()), message: None, result: Some(l) },
-            Some(Err(e)) if e == CANCELLED => MasterOutcome { id: f.id, status: Status::Cancelled, path: None, message: None, result: None },
+            Some(Err(e)) if i18n::is_cancelled(&e) => MasterOutcome { id: f.id, status: Status::Cancelled, path: None, message: None, result: None },
             Some(Err(e)) => MasterOutcome { id: f.id, status: Status::Failed, path: None, message: Some(e), result: None },
-            None => MasterOutcome { id: f.id, status: Status::Failed, path: None, message: Some("abgebrochen (interner Fehler)".into()), result: None },
+            None => MasterOutcome { id: f.id, status: Status::Failed, path: None, message: Some(t(Msg::StoppedInternal).into()), result: None },
         });
     }
     outcomes.sort_by_key(|o| o.id);
@@ -1160,6 +984,25 @@ mod tests {
     }
 
     #[test]
+    fn format_line_and_notes_follow_the_language() {
+        assert_eq!(format_line(Lang::De, "WAV", "16-bit", 44_100, 2), "WAV · 16-bit · 44,1 kHz · Stereo");
+        assert_eq!(format_line(Lang::En, "WAV", "16-bit", 44_100, 2), "WAV · 16-bit · 44.1 kHz · Stereo");
+        assert_eq!(format_line(Lang::Fr, "WAV", "16-bit", 44_100, 2), "WAV · 16-bit · 44,1 kHz · Stéréo");
+        assert_eq!(format_line(Lang::It, "WAV", "16-bit", 44_100, 2), "WAV · 16-bit · 44,1 kHz · Stereo");
+        assert_eq!(format_line(Lang::En, "MP3", "192 kbit/s", 48_000, 1), "MP3 · 192 kbit/s · 48 kHz · Mono");
+        assert_eq!(format_line(Lang::De, "FLAC", "", 96_000, 6), "FLAC · 96 kHz · 6 Kanäle");
+        assert_eq!(format_line(Lang::En, "FLAC", "", 96_000, 6), "FLAC · 96 kHz · 6 channels");
+        assert_eq!(format_line(Lang::Fr, "CAF", "32-bit float", 32_000, 3), "CAF · 32-bit float · 32 kHz · 3 canaux");
+        assert_eq!(format_line(Lang::It, "AIFF", "24-bit", 88_200, 4), "AIFF · 24-bit · 88,2 kHz · 4 canali");
+        assert_eq!(i18n::format(Lang::En, Msg::RateUnsupportedMp3, &[("rate", &7350)]), "Sample rate 7350 Hz is not supported for MP3");
+        assert_eq!(i18n::format(Lang::Fr, Msg::NoteVeryQuiet, &[("max", &"40")]), "très faible, gain limité à +40 dB");
+        for l in Lang::ALL {
+            assert!(i18n::is_cancelled(i18n::text(l, Msg::Cancelled)));
+        }
+        assert!(!i18n::is_cancelled("Analysis failed."));
+    }
+
+    #[test]
     fn limiter_holds_the_ceiling_and_leaves_the_rest_alone() {
         let rate = 48_000;
         let mut rnd = rng(3);
@@ -1205,6 +1048,31 @@ mod tests {
                 assert!(ratio < 0.01, "{freq} Hz: {ratio}");
             }
         }
+    }
+
+    /// Only files that belong to a multi-part recording count as raw chunks, whatever their names.
+    #[test]
+    fn marks_chunks_of_multi_part_recordings() {
+        let dir = tempdir("master-chunks");
+        let sr = 16_000;
+        let s = speechy(11, sr, 20, 0.2);
+        let tr0 = 9 * 3600 * sr as u64;
+        write_float_bwf(&dir.join("take-a.wav"), sr, &s[..160_000], "2026-01-01", "09:00:00", tr0);
+        write_float_bwf(&dir.join("take-b.WAV"), sr, &s[160_000..], "2026-01-01", "09:00:10", tr0 + 160_000);
+        write_float_wav(&dir.join("DJI_01_20260101_120000.WAV"), sr, &speechy(12, sr, 5, 0.2));
+        write_float_wav(&dir.join("tracks/260101_S090000-E090020_D000020_rec.wav"), sr, &s);
+        let plan = analyze(&[dir.clone()], &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let mut parts: Vec<(String, bool)> = plan.files.iter().map(|f| (f.name.clone(), f.dji_part)).collect();
+        parts.sort();
+        assert_eq!(
+            parts,
+            [
+                ("260101_S090000-E090020_D000020_rec.wav".to_string(), false),
+                ("DJI_01_20260101_120000.WAV".to_string(), false),
+                ("take-a.wav".to_string(), true),
+                ("take-b.WAV".to_string(), true),
+            ]
+        );
     }
 
     #[test]

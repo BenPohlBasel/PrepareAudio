@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrepareAudio – Aufnahme-Teile zusammenfügen, Audioquellen synchronisieren, als MP3 mastern</title>
+<meta name="description" content="WAV-Aufnahme-Teile von Audiorecordern verlustfrei zusammenfügen, zwei Audioquellen synchron als Stereo ausgeben, in einer Timeline bearbeiten und als MP3 auf −16 LUFS mastern. Offline, kostenlos, Open Source unter AGPL. Von B/IAS.">
+<link rel="canonical" href="https://bias.city/prepareaudio/">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 884 896%22%3E%3Cpath d=%22M870.833,227.083l0,437.5c0,118.432 -96.152,214.583 -214.583,214.583l-429.167,0c-118.432,0 -214.583,-96.152 -214.583,-214.583l0,-437.5c0,-118.432 96.152,-214.583 214.583,-214.583l429.167,0c118.432,0 214.583,96.152 214.583,214.583Z%22 style=%22fill:url(%23_Linear1);stroke:%23000;stroke-opacity:0;stroke-width:2.08px;%22/%3E%3Cpath d=%22M362.849,537.5l0,181.25c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-181.25c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M362.849,322.917l0,87.5c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-87.5c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M249.651,370.484l0,348.615c0,19.354 -15.713,35.068 -35.068,35.068c-19.354,0 -35.068,-15.713 -35.068,-35.068l0,-348.615c0,-19.354 15.713,-35.068 35.068,-35.068c19.354,0 35.068,15.713 35.068,35.068Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M478.487,435.779l0,281.568c0,20.322 -16.499,36.82 -36.82,36.82c-20.322,0 -36.82,-16.499 -36.82,-36.82l0,-281.568c0,-20.322 16.499,-36.82 36.82,-36.82c20.322,0 36.82,16.499 36.82,36.82Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M589.583,618.75l0,100c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-100c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M589.583,173.958l0,31.25c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-31.25c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M589.583,315.625l0,31.25c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-31.25c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M250,173.958l0,31.25c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-31.25c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M704.167,173.958l0,89.583c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-89.583c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z%22 style=%22fill:%23fff;%22/%3E%3Cpath d=%22M704.167,366.667l0,352.083c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-352.083c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z%22 style=%22fill:%23fff;%22/%3E%3Cdefs%3E%3ClinearGradient id=%22_Linear1%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%220%22 gradientUnits=%22userSpaceOnUse%22 gradientTransform=%22matrix(2.083333,-556.25,556.25,2.083333,304.166667,879.166667)%22%3E%3Cstop offset=%220%22 style=%22stop-color:%23ff5300;stop-opacity:1%22/%3E%3Cstop offset=%221%22 style=%22stop-color:%234f0070;stop-opacity:1%22/%3E%3C/linearGradient%3E%3C/defs%3E%3C/svg%3E">
+<style>
+/* Recursive Variable Font — SIL OFL 1.1, Lizenztext in fonts/OFL.txt.
+   Lokal eingebunden: die Seite lädt NICHTS von fremden Servern. */
+@font-face{
+  font-family:"Recursive";
+  src:url("fonts/Recursive_VF.woff2") format("woff2");
+  font-weight:300 1000;
+  font-display:swap;
+}
+:root{
+  --paper:#fff;--ink:#000;--ink-2:#000;--line:#e2e2e6;--rule:#9c9ca3;--wash:#f3f3f5;
+  /* Der Ton kommt aus dem App-Zeichen (Verlauf #4f0070 → #ff5300), in
+     Stufen: 600 trägt Knöpfe und Links, 700 den Zeigezustand, 300 die
+     Links auf dunklem Grund. Dieselbe Aubergine wie in der App. */
+  --aub-700:#43065f;--aub-600:#56107a;--aub-500:#4f0070;--aub-300:#d3a6ea;--aub-050:#f3eaf6;
+  --aub:var(--aub-600);--aub-2:var(--aub-700);
+  --w:72rem;
+  --dunkel:#1b1b1f;--dunkel-2:#121215;--dunkel-line:#3b3b42;--dunkel-rule:#6d6d75;--dunkel-ink:#fff;--dunkel-ink-2:#fff;
+}
+*{box-sizing:border-box}
+html{font-size:17px;-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+@media (max-width:640px){html{font-size:16px}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:"Recursive",system-ui,-apple-system,sans-serif;font-variation-settings:'CASL' 0,'MONO' 0;line-height:1.5}
+a{color:inherit;text-decoration:underline;text-decoration-color:var(--aub);text-underline-offset:.18em;text-decoration-thickness:1.5px}
+a:hover{text-decoration-thickness:2.5px}
+:focus-visible{outline:2px solid var(--aub);outline-offset:3px}
+img{max-width:100%;height:auto;display:block}
+h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.01em;line-height:1.15}
+h1{font-size:clamp(2rem,4.6vw,3.4rem);font-weight:640}
+h2{font-size:clamp(1.45rem,3vw,2rem)}
+h3{font-size:1.15rem}
+p{margin:0}
+ul,ol{margin:0;padding-left:1.15rem}
+li{margin:.35rem 0}
+.small{font-size:.86rem;color:var(--ink-2)}
+.wrap{max-width:var(--w);margin:0 auto;padding:0 1.25rem}
+
+/* Raster wie bei LocalTranscript: Label 17 rem, Inhalt mindestens
+   30 rem; ohne Platz fällt der Inhalt unter das Label. */
+body{font-size:clamp(1rem,.85rem + .35vw,1.15rem)}
+section{padding:4.5rem 0}
+@media (max-width:640px){section{padding:3rem 0}}
+main>section:nth-child(even){background:var(--wash)}
+main>section.dpo{background:var(--dunkel)}
+.row{display:flex;flex-wrap:wrap;gap:.9rem 3rem;align-items:flex-start}
+.row>:first-child{flex:0 0 min(100%,17rem)}
+.row>:last-child{flex:1 1 30rem;min-width:0}
+.row.kopf{display:block;margin-bottom:2.5rem}
+.row.kopf .t{margin-top:.9rem}
+.row.schritt>:first-child{flex:1 1 26rem}
+.row.schritt>:last-child{flex:1 1 30rem}
+.row+.row{margin-top:1.6rem}
+.row.gross+.row.gross{margin-top:2.25rem;padding-top:2.25rem;border-top:1px solid var(--rule)}
+.row.kopf+.row.gross{border-top:0;padding-top:0;margin-top:0}
+.row .t h3{margin-bottom:.35rem}
+.row .t h3:has(.nr){display:flex;align-items:center}
+.row .t p+p,.row .t ul,.row .t ol,.row .t ul+p{margin-top:.6rem}
+.row .t li b,.row .t p b{font-weight:560}
+.row>:first-child h3{font-size:1.05rem}
+.row code{display:inline-block;margin-bottom:.4rem}
+.row h3 .nr{display:inline-flex;align-items:center;justify-content:center;width:2.1rem;height:2.1rem;margin-right:.65rem;border-radius:50%;background:var(--aub);font-variation-settings:'MONO' 1;font-size:.95rem;font-weight:560;color:#fff;flex:none}
+.keys{list-style:none;padding:0}
+.keys li{display:flex;gap:.75rem;align-items:baseline}
+.keys kbd{flex:0 0 5.2rem;font:inherit;font-variation-settings:'MONO' 1;font-size:.9rem;font-weight:560}
+.lede{font-size:clamp(1.15rem,1rem + .5vw,1.4rem);line-height:1.4;color:var(--ink-2)}
+.zitat{margin:0 0 3rem;padding:0}
+.zitat p{font-size:clamp(2rem,4.6vw,3.4rem);line-height:1.15;letter-spacing:-.01em;font-weight:640;color:var(--ink)}
+.zitat p::before{content:"«";margin-right:.05em}
+.zitat p::after{content:"»";margin-left:.05em}
+.zitat footer{margin-top:1.1rem;padding:0;background:none;font-size:1rem;color:var(--ink-2)}
+
+header{position:sticky;top:0;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);z-index:5}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:1rem;height:3.5rem}
+.brand{font-family:system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;font-weight:700;letter-spacing:.01em;color:#000;text-decoration:none;font-size:1.2rem}
+.right{display:flex;align-items:center;gap:1.25rem}
+.right a.nav{font-size:.92rem;color:#000;text-decoration:none}
+.right a.nav:hover{text-decoration:underline;text-decoration-color:var(--aub)}
+@media (max-width:860px){.right a.nav{display:none}}
+.langs{display:flex;gap:.15rem}
+.langs button{font:inherit;font-size:.9rem;background:none;border:1px solid transparent;border-radius:.35rem;padding:.25rem .5rem;color:#000;cursor:pointer;font-variation-settings:'MONO' 1}
+.langs button[aria-pressed="true"]{border-color:var(--line);background:var(--wash)}
+
+.hero{padding-top:3.5rem}
+.hero h1{margin-bottom:2rem}
+h1 .initial{width:.92em;height:.92em;display:inline-block;vertical-align:-.1em;margin-right:.22em}
+.hero .row{align-items:flex-end}
+.hero .row>:first-child{flex:1 1 30rem}
+.hero .row>:last-child{flex:0 1 auto}
+.cta{display:flex;flex-wrap:wrap;gap:.75rem 1rem}
+.hero .small{margin-top:.9rem}
+.window{margin-top:3rem;border:1px solid var(--line);border-radius:.7rem;overflow:hidden;background:var(--wash);box-shadow:0 1px 2px rgba(31,31,38,.05),0 8px 20px rgba(31,31,38,.08),0 32px 64px -16px rgba(31,31,38,.22)}
+.window .chrome{height:1.7rem;background:#ececef;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:.4rem;padding-left:.75rem}
+.window .chrome i{width:.7rem;height:.7rem;border-radius:50%;background:#d7d7dc;display:block}
+.window img{width:100%;aspect-ratio:16/10}
+
+.btn{display:inline-block;background:var(--aub);color:#fff;text-decoration:none;padding:.7rem 1.1rem;border-radius:.45rem;font-weight:560}
+.btn:hover{background:var(--aub-2);color:#fff}
+.btn.ghost{background:none;color:var(--ink);border:1px solid var(--line)}
+.btn.ghost:hover{border-color:var(--ink)}
+
+.shot{border:1px solid var(--line);border-radius:.5rem;overflow:hidden;background:var(--wash);box-shadow:0 1px 2px rgba(31,31,38,.05),0 6px 16px rgba(31,31,38,.08),0 24px 48px -12px rgba(31,31,38,.2)}
+.shot img{width:100%}
+.shot+.shot{margin-top:1rem}
+
+code{font-variation-settings:'MONO' 1;font-size:.9rem;background:var(--paper);border:1px solid var(--line);border-radius:.3rem;padding:.15rem .45rem}
+
+.dpo{background:var(--dunkel);color:var(--dunkel-ink)}
+.dpo h2,.dpo h3{color:#fff}
+.dpo a{color:#fff;text-decoration-color:var(--aub-300)}
+.dpo .lede,.dpo .row .t p,.dpo .row .t li,.dpo .small{color:var(--dunkel-ink-2)}
+.dpo .row.gross+.row.gross{border-top-color:var(--dunkel-rule)}
+
+body>footer{padding:2.5rem 0 3rem;font-size:.88rem;color:var(--ink-2);background:var(--wash)}
+footer .row>:first-child{flex:1 1 24rem}
+footer .row>:last-child{flex:1 1 20rem}
+footer address{font-style:normal}
+footer .links{display:flex;flex-wrap:wrap;gap:.35rem .5rem}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap bar">
+    <a class="brand" href="https://bias.city">B/IAS</a>
+    <div class="right">
+      <a class="nav" href="#guide" data-t="navGuide"></a>
+      <a class="nav" href="#dpo" data-t="navDpo"></a>
+      <a class="nav" href="https://github.com/BenPohlBasel/PrepareAudio">GitHub</a>
+      <nav class="langs" aria-label="Sprache / Language">
+        <button data-lang="de" aria-pressed="true">DE</button>
+        <button data-lang="en" aria-pressed="false">EN</button>
+        <button data-lang="fr" aria-pressed="false">FR</button>
+        <button data-lang="it" aria-pressed="false">IT</button>
+      </nav>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="wrap">
+    <h1><svg class="initial" viewBox="0 0 884 896" aria-hidden="true"><path d="M870.833,227.083l0,437.5c0,118.432 -96.152,214.583 -214.583,214.583l-429.167,0c-118.432,0 -214.583,-96.152 -214.583,-214.583l0,-437.5c0,-118.432 96.152,-214.583 214.583,-214.583l429.167,0c118.432,0 214.583,96.152 214.583,214.583Z" style="fill:url(#pa-initial-grad);stroke:#000;stroke-opacity:0;stroke-width:2.08px;"/><path d="M362.849,537.5l0,181.25c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-181.25c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z" style="fill:#fff;"/><path d="M362.849,322.917l0,87.5c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-87.5c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z" style="fill:#fff;"/><path d="M249.651,370.484l0,348.615c0,19.354 -15.713,35.068 -35.068,35.068c-19.354,0 -35.068,-15.713 -35.068,-35.068l0,-348.615c0,-19.354 15.713,-35.068 35.068,-35.068c19.354,0 35.068,15.713 35.068,35.068Z" style="fill:#fff;"/><path d="M478.487,435.779l0,281.568c0,20.322 -16.499,36.82 -36.82,36.82c-20.322,0 -36.82,-16.499 -36.82,-36.82l0,-281.568c0,-20.322 16.499,-36.82 36.82,-36.82c20.322,0 36.82,16.499 36.82,36.82Z" style="fill:#fff;"/><path d="M589.583,618.75l0,100c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-100c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z" style="fill:#fff;"/><path d="M589.583,173.958l0,31.25c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-31.25c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z" style="fill:#fff;"/><path d="M589.583,315.625l0,31.25c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-31.25c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z" style="fill:#fff;"/><path d="M250,173.958l0,31.25c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-31.25c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z" style="fill:#fff;"/><path d="M704.167,173.958l0,89.583c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-89.583c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z" style="fill:#fff;"/><path d="M704.167,366.667l0,352.083c0,19.547 -15.87,35.417 -35.417,35.417c-19.547,0 -35.417,-15.87 -35.417,-35.417l0,-352.083c0,-19.547 15.87,-35.417 35.417,-35.417c19.547,0 35.417,15.87 35.417,35.417Z" style="fill:#fff;"/><defs><linearGradient id="pa-initial-grad" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(2.083333,-556.25,556.25,2.083333,304.166667,879.166667)"><stop offset="0" style="stop-color:#ff5300;stop-opacity:1"/><stop offset="1" style="stop-color:#4f0070;stop-opacity:1"/></linearGradient></defs></svg><span data-v></span><br><span data-t="h1"></span></h1>
+    <div class="row">
+      <div><p class="lede" data-t="lede"></p></div>
+      <div>
+        <div class="cta">
+          <a class="btn" href="https://github.com/BenPohlBasel/PrepareAudio/releases" data-t="cta"></a>
+          <a class="btn ghost" href="#guide" data-t="ctaGuide"></a>
+        </div>
+        <p class="small"><b data-v></b> · <span data-t="req"></span></p>
+      </div>
+    </div>
+    <div class="window">
+      <div class="chrome" aria-hidden="true"><i></i><i></i><i></i></div>
+      <img data-img="hero" src="img/hero-de.png" width="1600" height="1000" alt="PrepareAudio" data-alt="altHero">
+    </div>
+  </div>
+</section>
+
+<section id="guide">
+  <div class="wrap">
+    <div class="row kopf">
+      <div><h2 data-t="guideH"></h2></div>
+      <div class="t"><p class="lede" data-t="guideLede"></p></div>
+    </div>
+    <div class="row schritt gross">
+      <div class="t">
+        <h3><span class="nr">1</span><span data-t="g1h"></span></h3>
+        <p data-t="g1a"></p>
+        <p data-t="g1b"></p>
+        <p data-t="g1c"></p>
+      </div>
+      <div class="shot"><img data-img="merge" src="img/merge-de.png" width="1200" height="750" alt="" data-alt="altMerge"></div>
+    </div>
+    <div class="row schritt gross">
+      <div class="t">
+        <h3><span class="nr">2</span><span data-t="g2h"></span></h3>
+        <p data-t="g2a"></p>
+        <p data-t="g2b"></p>
+      </div>
+      <div class="shot"><img data-img="sync" src="img/sync-de.png" width="1200" height="750" alt="" data-alt="altSync"></div>
+    </div>
+    <div class="row schritt gross">
+      <div class="t">
+        <h3><span class="nr">3</span><span data-t="g3h"></span></h3>
+        <p data-t="g3a"></p>
+        <p data-t="g3b"></p>
+        <ul class="keys">
+          <li><kbd>␣</kbd><span data-t="k1"></span></li>
+          <li><kbd>S</kbd><span data-t="k2"></span></li>
+          <li><kbd>J</kbd><span data-t="k3"></span></li>
+          <li><kbd>⌫</kbd><span data-t="k4"></span></li>
+          <li><kbd>↑ ↓</kbd><span data-t="k5"></span></li>
+          <li><kbd>⌘Z ⇧⌘Z</kbd><span data-t="k6"></span></li>
+        </ul>
+        <p data-t="g3c"></p>
+      </div>
+      <div class="shot"><img data-img="edit" src="img/edit-de.png" width="1200" height="750" alt="" data-alt="altEdit"></div>
+    </div>
+    <div class="row schritt gross">
+      <div class="t">
+        <h3><span class="nr">4</span><span data-t="g4h"></span></h3>
+        <p data-t="g4a"></p>
+        <p data-t="g4b"></p>
+      </div>
+      <div class="shot"><img data-img="done" src="img/done-de.png" width="1200" height="750" alt="" data-alt="altDone"></div>
+    </div>
+    <div class="row schritt gross">
+      <div class="t">
+        <h3><span class="nr">5</span><span data-t="g5h"></span></h3>
+        <p data-t="g5a"></p>
+        <ul>
+          <li data-t="m1"></li><li data-t="m2"></li>
+          <li data-t="m3"></li><li data-t="m4"></li>
+        </ul>
+        <p data-t="g5b"></p>
+      </div>
+      <div class="shot"><img data-img="master" src="img/master-de.png" width="1200" height="750" alt="" data-alt="altMaster"></div>
+    </div>
+    <div class="row schritt gross">
+      <div class="t">
+        <h3><span class="nr">6</span><span data-t="g6h"></span></h3>
+        <p data-t="g6a"></p>
+      </div>
+      <div class="shot"><img data-img="info" src="img/info-de.png" width="1200" height="750" alt="" data-alt="altInfo"></div>
+    </div>
+  </div>
+</section>
+
+<section id="license">
+  <div class="wrap">
+    <blockquote class="zitat">
+      <p data-t="licLede"></p>
+      <footer>— B/IAS, Basel Institut für angewandte Stadtforschung</footer>
+    </blockquote>
+    <div class="row kopf">
+      <div><h2 data-t="licH"></h2></div>
+      <div class="t"></div>
+    </div>
+    <div class="row">
+      <div><h3 data-t="l1h"></h3></div>
+      <div class="t"><p data-t="l1p"></p></div>
+    </div>
+    <div class="row">
+      <div><h3 data-t="l2h"></h3></div>
+      <div class="t"><p data-t="l2p"></p></div>
+    </div>
+    <div class="row">
+      <div><h3 data-t="l3h"></h3></div>
+      <div class="t"><p data-t="l3p"></p></div>
+    </div>
+  </div>
+</section>
+
+<section id="proofs">
+  <div class="wrap">
+    <div class="row kopf">
+      <div><h2 data-t="proofsH"></h2></div>
+      <div class="t"></div>
+    </div>
+    <div class="row">
+      <div><code>338 MiB</code></div>
+      <div class="t"><h3 data-t="p1a"></h3><p data-t="p1b"></p></div>
+    </div>
+    <div class="row">
+      <div><code>0 %</code></div>
+      <div class="t"><h3 data-t="p2a"></h3><p data-t="p2b"></p></div>
+    </div>
+    <div class="row">
+      <div><code>−16 LUFS</code></div>
+      <div class="t"><h3 data-t="p3a"></h3><p data-t="p3b"></p></div>
+    </div>
+    <div class="row">
+      <div><code>git clone</code></div>
+      <div class="t"><h3 data-t="p4a"></h3><p data-t="p4b"></p></div>
+    </div>
+  </div>
+</section>
+
+<section class="dpo" id="dpo">
+  <div class="wrap">
+    <div class="row kopf">
+      <div><h2 data-t="dpoH"></h2></div>
+      <div class="t"><p class="lede" data-t="dpoLede"></p></div>
+    </div>
+    <div class="row gross">
+      <div><h3 data-t="flowT"></h3></div>
+      <div class="t"><ol><li data-t="d1"></li><li data-t="d2"></li><li data-t="d3"></li><li data-t="d4"></li><li data-t="d5"></li></ol></div>
+    </div>
+    <div class="row gross">
+      <div><h3 data-t="yoursH"></h3></div>
+      <div class="t"><ul><li data-t="y1"></li><li data-t="y2"></li><li data-t="y3"></li><li data-t="y4"></li></ul><p class="small" style="margin-top:1rem" data-t="dpoNote"></p></div>
+    </div>
+  </div>
+</section>
+
+<section id="contact">
+  <div class="wrap">
+    <div class="row kopf">
+      <div><h2 data-t="conH"></h2></div>
+      <div class="t"></div>
+    </div>
+    <div class="row">
+      <div><h3 data-t="conL1"></h3></div>
+      <div class="t">
+        <p data-t="conLede"></p>
+        <div class="cta" style="margin-top:1rem"><a class="btn" href="https://www.linkedin.com/company/107715664/" data-t="conBtn"></a></div>
+      </div>
+    </div>
+    <div class="row">
+      <div><h3 data-t="conL2"></h3></div>
+      <div class="t">
+        <p data-t="conAlt"></p>
+        <div class="cta" style="margin-top:1rem"><a class="btn ghost" href="https://github.com/BenPohlBasel/PrepareAudio/issues" data-t="conIssue"></a></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap row">
+    <address>
+      <b>B/IAS – Basel Institut für angewandte Stadtforschung</b><br>
+      Beckenweg 6 · 4056 Basel · <a href="https://bias.city">bias.city</a><br>
+      <span data-t="footDev"></span>
+    </address>
+    <p class="links">
+      <span data-v></span> ·
+      <a href="https://github.com/BenPohlBasel/PrepareAudio" data-t="footSrc"></a> ·
+      <a href="https://github.com/BenPohlBasel/PrepareAudio/issues">Issues</a> ·
+      <a href="https://github.com/BenPohlBasel/PrepareAudio/blob/main/LICENSE">AGPL-3.0</a> ·
+      <a href="https://github.com/BenPohlBasel/PrepareAudio/blob/main/THIRD_PARTY_LICENSES.md" data-t="footThird"></a> ·
+      <a href="https://www.linkedin.com/company/107715664/">LinkedIn</a> ·
+      <span data-t="footFont"></span> ·
+      <span data-t="footNoTrack"></span>
+    </p>
+  </div>
+</footer>
+
+<script>
+const VERSION = "0.2.0";
+document.querySelectorAll('[data-v]').forEach(e => e.textContent = 'PrepareAudio ' + VERSION);
+
+const T = {
+de:{
+  navGuide:"Anleitung", navDpo:"Datenschutz",
+  h1:"Aus Aufnahme-Teilen werden ganze, synchrone Gespräche.",
+  lede:"Audiorecorder schneiden lange Aufnahmen in Stücke, und zwei Sender laufen nie ganz gleich. PrepareAudio fügt die WAV-Teile verlustfrei zusammen, legt die Audioquellen synchron übereinander und mastert das Ergebnis als MP3 auf −16 LUFS. Alles auf deinem Mac: kein Konto, keine Cloud, kein installiertes ffmpeg.",
+  cta:"Herunterladen für macOS", ctaGuide:"Anleitung lesen",
+  req:"Für Macs mit Apple Silicon ab macOS 12 · 8 MB · signiert und notarisiert · Deutsch, Englisch, Französisch, Italienisch · kostenlos und Open Source, AGPL-3.0",
+  altHero:"Timeline von PrepareAudio: Stereo-Clips zweier Sender in der Mitte, Mono-Clips nach aussen geschoben",
+  altMerge:"Reiter Zusammenfügen mit den gefundenen Aufnahmen und ihren Teilen",
+  altSync:"Analyse mit Track-Paaren, Versatz, Drift und Trefferanteil",
+  altEdit:"Timeline mit getrennten Clips und geöffnetem Kontextmenü",
+  altDone:"Abschlusskarte «23 von 23 erledigt» mit Knopf zum nächsten Schritt",
+  altMaster:"Reiter Mastern mit Format und gemessener Lautheit je Datei",
+  altInfo:"Info-Feld mit Herausgeber, Links, Sprachwahl und Lizenzen",
+
+  guideH:"Bedienungsanleitung",
+  guideLede:"Drei Reiter, drei Schritte: zusammenfügen, synchronisieren, mastern. Jeder nimmt das Ergebnis des vorigen und lässt sich auch einzeln nutzen.",
+  g1h:"Teile zusammenfügen",
+  g1a:"Ordner ins Fenster ziehen oder «Ordner wählen…». Zusammenfügen nimmt nur WAV, von jedem Audiorecorder. Die App durchsucht alle Unterordner, egal wie sortiert, und erkennt die Teile einer Aufnahme an ihrer Aufnahmezeit: aus den Metadaten der Datei (Broadcast-WAV), aus dem Dateinamen oder aus dem Dateidatum.",
+  g1b:"Ein Folgeteil hat dasselbe Format und beginnt dort, wo der vorige volle Teil endet; mit Zeitmarke in den Metadaten auf das Sample genau. Passen zwei Teile gleich gut, etwa bei zwei Sendern, entscheidet das Audio an der Nahtstelle: Ein linearer Prädiktor sagt nur beim echten Anschluss die andere Seite voraus.",
+  g1c:"«Zusammenfügen…» fragt, wo gespeichert werden soll, und legt dort den Ordner tracks an. Die Audiodaten werden bitgenau kopiert, ab 4 GB als RF64. Originale bleiben unberührt, vorhandene Dateien werden nie überschrieben.",
+  g2h:"Audioquellen synchronisieren",
+  g2a:"Im zweiten Reiter den Ordner tracks ablegen. Neben WAV nimmt Synchronisieren auch MP3, M4A/AAC, FLAC, ALAC, AIFF, CAF und OGG und dekodiert sie einmal, damit Vorschau und Timeline flüssig laufen; die Ergebnisse sind WAV. Die App sucht gemeinsame Ereignisse mit festem Zeitversatz: Silben, Stuhlrücken, Geschirr. Klangähnlichkeit hilft nicht, denn bei zwei Ansteckmikros ist die lauteste Stimme oft gegenläufig.",
+  g2b:"Je Track-Paar misst sie Versatz, Uhrendrift und Streuung und prüft in 20-Sekunden-Fenstern, ob die Ereignisse übereinstimmen. Gemeinsame Abschnitte werden Stereo. Getrennt wird nur, wenn beide Sender gleichzeitig verschiedene Gespräche aufnehmen. Läuft nur ein Sender, bleibt das in der Stereo-Datei.",
+  g3h:"In der Timeline bearbeiten",
+  g3a:"Der Vorschlag der Analyse steht als Timeline da. Stereo liegt innen, wo sich die Spuren treffen, der erste Sender blau links, der zweite rot rechts. Mono ist nach aussen geschoben und heller. Weggeschnittenes ist schraffiert, darunter liegen die gemeinsamen Ereignisse.",
+  g3b:"Trimmen und verlängern an den Kanten, trennen, zusammenführen, löschen und wiederbringen, auf Stereo oder Mono schieben. Zeitlich verschieben geht nicht: Die gemessene Lage jeder Spur bleibt fest, beide Sender bleiben synchron.",
+  k1:"abspielen und anhalten, mit Vorschau über den Lautsprecher",
+  k2:"am Playhead trennen",
+  k3:"mit dem nächsten Clip zusammenführen",
+  k4:"löschen oder wiederbringen",
+  k5:"auf Stereo oder Mono schieben",
+  k6:"rückgängig und wiederholen",
+  g3c:"Jede Änderung berechnet die Ausgabeliste sofort neu. Die Bearbeitung liegt als kleine Datei neben den Quellen und ist beim nächsten Öffnen wieder da.",
+  g4h:"Speichern",
+  g4a:"«Erzeugen…» fragt nach dem Speicherort und schreibt den Ordner sync mit Stereo- und Mono-WAV. Solange gerechnet wird, dreht sich ein Rad, und die Prozente zählen nur erledigte Arbeit.",
+  g4b:"Danach leert sich die Liste und meldet «x von x erledigt». Was nicht geklappt hat, bleibt stehen, mit «Wiederholen». So arbeiten alle drei Reiter.",
+  g5h:"Als MP3 mastern",
+  g5a:"Der dritte Reiter nimmt WAV, auch RF64 und 32-bit float, dazu MP3, M4A, FLAC, ALAC, AIFF, CAF und OGG. Er zeigt Format, Bittiefe, Abtastrate und Kanäle und misst die Lautheit nach EBU R128.",
+  m1:"feste Verstärkung auf −16 LUFS, keine Kompression",
+  m2:"Look-ahead-Limiter bei −1,5 dBTP, auch für Spitzen zwischen den Samples",
+  m3:"MP3 mit 192 kbit/s, Mono bleibt Mono",
+  m4:"das fertige MP3 wird nachgemessen und bei Abweichung neu kodiert",
+  g5b:"Das Ergebnis liegt im Ordner master und ist bereit für die Transkription.",
+  g6h:"Info, Sprache und Lizenzen",
+  g6a:"Das i oben rechts zeigt Version, Herausgeber, Links zu bias.city und zum Quellcode und alle mitgelieferten Bausteine mit ihren Lizenztexten. Dort wählst du auch die Sprache: Deutsch, Englisch, Französisch oder Italienisch. Installiert sein muss nichts; Symphonia liest die Formate, ebur128 misst, LAME ist fest einkompiliert, cpal spielt die Vorschau.",
+
+  licH:"Warum kostenlos",
+  licLede:"Wir haben die App für unsere eigenen Aufnahmen gebaut. Sie hat den höchsten Gebrauchswert, wenn viele sie nutzen können.",
+  l1h:"AGPL-3.0", l1p:"Wer die App verändert und weitergibt, muss den Quellcode ebenfalls offenlegen. Das schützt dich davor, dass eine geschlossene Variante unter demselben Namen auftaucht.",
+  l2h:"Keine Pro-Stufe", l2p:"Zusammenfügen, Synchronisieren, Timeline und Mastern. Es gibt nichts freizuschalten und nichts, was später kostenpflichtig wird.",
+  l3h:"Was Geld kostet", l3p:"Support, Installationen für Institute und Anpassungen an bestimmte Arbeitsabläufe. Das finanziert die Weiterentwicklung, nicht der Download.",
+
+  proofsH:"Was du selbst prüfen kannst",
+  p1a:"Nur ein voller Teil hat einen Nachfolger.", p1b:"So klebt eine kurze Aufnahme des einen Senders nie an den Anfang des anderen. Die Prüfung der Nahtstelle wurde an 38 echten Nähten gemessen.",
+  p2a:"Gegenproben ohne Treffer.", p2b:"Um 47 Sekunden versetzt oder aus unabhängigen Aufnahmen ergaben sich 0 % Treffer und eine Kohärenz von höchstens 0,005. Echte gemeinsame Phasen lagen bei 76 bis 100 % Treffern.",
+  p3a:"Gemessen, nicht geschätzt.", p3b:"Die eingebaute Messung weicht auf einer echten 32-bit-float-Aufnahme weniger als 0,05 LU von ffmpeg loudnorm ab. Jedes MP3 wird nach dem Kodieren nachgemessen.",
+  p4a:"Selbst weiterentwickeln und kompilieren.", p4b:"Das Repository enthält die ganze Build-Kette bis zur signierten App. Wer der Binärdatei nicht traut, kompiliert.",
+
+  dpoH:"Datenschutz",
+  dpoLede:"PrepareAudio verarbeitet Gesprächsaufnahmen. Darum bleibt alles auf deinem Rechner: Die App baut selbst keine Netzverbindung auf, weder für Telemetrie noch für Updates noch für Absturzberichte.",
+  flowT:"Datenfluss",
+  d1:"<b>Eingabe:</b> WAV-Teile und Audiodateien vom lokalen Dateisystem, nur gelesen.",
+  d2:"<b>Verarbeitung:</b> im Prozess der App, auf deinem Mac. Keine Hilfsprogramme, keine Cloud.",
+  d3:"<b>Ablage:</b> die Ordner tracks, sync und master dort, wo du sie speicherst; die Timeline-Bearbeitung als kleine JSON-Datei neben den Quellen; dekodierte Kopien von MP3 & Co. im Cache der App (~/Library/Caches/city.bias.prepareaudio).",
+  d4:"<b>Vorschau:</b> über das Standard-Ausgabegerät. Aufgenommen wird nichts.",
+  d5:"<b>Netz:</b> keine Verbindung. Nur Links im Info-Feld öffnen auf Klick den Browser.",
+  yoursH:"Was in deiner Verantwortung bleibt",
+  y1:"Einwilligung und Information der aufgenommenen Personen.",
+  y2:"Verschlüsselung des Datenträgers, etwa mit FileVault.",
+  y3:"Löschfristen für die Originale, alle drei Ergebnisordner und den Cache; ungenutzte Cache-Dateien löscht die App nach 30 Tagen.",
+  y4:"Wohin die Ergebnisse danach gehen, etwa in eine Transkription.",
+  dpoNote:"Kein Auftragsverarbeiter, kein Drittlandtransfer, es wird nichts übermittelt. Die Einordnung der eigenen Verarbeitung nach DSGVO oder revDSG bleibt bei der verantwortlichen Stelle.",
+
+  conH:"Kontakt",
+  conL1:"Support und Installationen", conL2:"Fehler und Wünsche",
+  conLede:"Fragen zur App, Support, Installationen für Institute oder Anpassungen an einen Arbeitsablauf: schreib uns auf LinkedIn.",
+  conBtn:"B/IAS auf LinkedIn", conIssue:"Issue-Tracker auf GitHub",
+  conAlt:"Als Issue im GitHub-Repository, dort sind sie nachvollziehbar.",
+  footDev:"PrepareAudio ist eine App des B/IAS, entwickelt in Basel.",
+  footSrc:"Quellcode", footThird:"Lizenzen der Bausteine", footFont:"Schrift: Recursive, SIL OFL 1.1",
+  footNoTrack:"Diese Seite setzt keine Cookies und misst nichts."
+},
+en:{
+  navGuide:"Guide", navDpo:"Privacy",
+  h1:"Recording chunks become whole, synchronised conversations.",
+  lede:"Audio recorders cut long recordings into pieces, and two transmitters never run quite alike. PrepareAudio merges the WAV chunks losslessly, lays the audio sources on top of each other in sync and masters the result to MP3 at −16 LUFS. All on your Mac: no account, no cloud, no ffmpeg to install.",
+  cta:"Download for macOS", ctaGuide:"Read the guide",
+  req:"For Macs with Apple Silicon, macOS 12 or later · 8 MB · signed and notarised · German, English, French, Italian · free and open source, AGPL-3.0",
+  altHero:"PrepareAudio timeline: stereo clips of two transmitters in the middle, mono clips pushed outwards",
+  altMerge:"Merge tab with the recordings found and their chunks",
+  altSync:"Analysis with track pairs, offset, drift and hit rate",
+  altEdit:"Timeline with split clips and an open context menu",
+  altDone:"Completion card “23 of 23 done” with a button to the next step",
+  altMaster:"Master tab with format and measured loudness per file",
+  altInfo:"Info panel with publisher, links, language choice and licences",
+  guideH:"User guide",
+  guideLede:"Three tabs, three steps: merge, synchronise, master. Each takes the result of the one before and also works on its own.",
+  g1h:"Merge the chunks",
+  g1a:"Drag folders into the window or choose a folder. Merging accepts WAV only, from any audio recorder. The app searches every subfolder, however it is sorted, and recognises the chunks of a recording by their recording time: from the file's metadata (Broadcast WAV), from the file name or from the file date.",
+  g1b:"A following chunk has the same format and starts where the previous full chunk ends; sample-exact when the metadata carry a time reference. If two chunks fit equally well, for instance with two transmitters, the audio at the seam decides: a linear predictor only forecasts the other side at the genuine join.",
+  g1c:"The merge button asks where to save and creates the folder tracks there. Audio data is copied bit for bit, as RF64 from 4 GB. Originals stay untouched, existing files are never overwritten.",
+  g2h:"Synchronise audio sources",
+  g2a:"Drop the tracks folder into the second tab. Besides WAV, synchronising also takes MP3, M4A/AAC, FLAC, ALAC, AIFF, CAF and OGG and decodes them once so preview and timeline run smoothly; the results are WAV. The app looks for shared events with a fixed time offset: syllables, chairs scraping, dishes. Similar sound does not help, because with two lavalier mics the loudest voice is often opposite.",
+  g2b:"For each track pair it measures offset, clock drift and spread and checks in 20-second windows whether the events agree. Shared stretches become stereo. They are only split when both transmitters record different conversations at the same time. If only one transmitter runs, that stays in the stereo file.",
+  g3h:"Edit in the timeline",
+  g3a:"The analysis proposal appears as a timeline. Stereo sits inside, where the tracks meet: the first transmitter blue on the left, the second red on the right. Mono is pushed outwards and paler. Cut-away parts are hatched, the shared events run underneath.",
+  g3b:"Trim and extend at the edges, split, join, delete and restore, move to stereo or mono. Moving in time is not possible: the measured position of each track stays fixed, both transmitters stay in sync.",
+  k1:"play and pause, previewed through the speaker",
+  k2:"split at the playhead",
+  k3:"join with the next clip",
+  k4:"delete or restore",
+  k5:"move to stereo or mono",
+  k6:"undo and redo",
+  g3c:"Every change recalculates the output list at once. The edit is kept as a small file next to the sources and is back the next time you open them.",
+  g4h:"Saving",
+  g4a:"Create asks for a location and writes the folder sync with stereo and mono WAV files. While the app computes, a wheel turns, and the percentage counts only finished work.",
+  g4b:"Afterwards the list clears and reports “x of x done”. Anything that failed stays, with a retry button. All three tabs work this way.",
+  g5h:"Master to MP3",
+  g5a:"The third tab takes WAV, including RF64 and 32-bit float, plus MP3, M4A, FLAC, ALAC, AIFF, CAF and OGG. It shows format, bit depth, sample rate and channels and measures loudness to EBU R128.",
+  m1:"fixed gain to −16 LUFS, no compression",
+  m2:"look-ahead limiter at −1.5 dBTP, including peaks between samples",
+  m3:"MP3 at 192 kbit/s, mono stays mono",
+  m4:"the finished MP3 is measured again and re-encoded if it is off",
+  g5b:"The result lands in the folder master, ready for transcription.",
+  g6h:"Info, language and licences",
+  g6a:"The i at the top right shows version, publisher, links to bias.city and the source code, and every bundled component with its licence text. That is also where you pick the language: German, English, French or Italian. Nothing needs to be installed; Symphonia reads the formats, ebur128 measures, LAME is compiled in, cpal plays the preview.",
+  licH:"Why free",
+  licLede:"We built the app for our own recordings. It is worth most when many people can use it.",
+  l1h:"AGPL-3.0", l1p:"Anyone who modifies and distributes the app must publish their source too. That protects you from a closed variant appearing under the same name.",
+  l2h:"No Pro tier", l2p:"Merging, synchronising, timeline and mastering. Nothing to unlock and nothing that becomes paid later.",
+  l3h:"What costs money", l3p:"Support, institutional rollouts and adaptations to particular workflows. That funds development, not the download.",
+  proofsH:"What you can check yourself",
+  p1a:"Only a full chunk has a successor.", p1b:"That way a short recording of one transmitter never gets glued to the start of the other. The seam check was measured on 38 real seams.",
+  p2a:"Control tests without hits.", p2b:"Shifted by 47 seconds or taken from unrelated recordings, the controls gave 0 % hits and a coherence of at most 0.005. Genuine shared phases reached 76 to 100 % hits.",
+  p3a:"Measured, not guessed.", p3b:"On a real 32-bit float recording the built-in measurement differs from ffmpeg loudnorm by less than 0.05 LU. Every MP3 is measured again after encoding.",
+  p4a:"Develop it further and compile it yourself.", p4b:"The repository holds the complete build chain up to the signed app. If you don't trust the binary, compile it.",
+  dpoH:"Privacy",
+  dpoLede:"PrepareAudio processes recorded conversations. So everything stays on your computer: the app opens no network connection of its own, not for telemetry, updates or crash reports.",
+  flowT:"Data flow",
+  d1:"<b>Input:</b> WAV chunks and audio files from the local file system, read only.",
+  d2:"<b>Processing:</b> inside the app's process, on your Mac. No helper programs, no cloud.",
+  d3:"<b>Storage:</b> the folders tracks, sync and master wherever you save them; the timeline edit as a small JSON file next to the sources; decoded copies of MP3 and similar files in the app cache (~/Library/Caches/city.bias.prepareaudio).",
+  d4:"<b>Preview:</b> through the default output device. Nothing is recorded.",
+  d5:"<b>Network:</b> no connection. Only links in the info panel open the browser when clicked.",
+  yoursH:"What stays your responsibility",
+  y1:"Consent and information of the people recorded.",
+  y2:"Disk encryption, for example with FileVault.",
+  y3:"Retention periods for the originals, all three result folders and the cache; the app deletes unused cache files after 30 days.",
+  y4:"Where the results go afterwards, for example into a transcription.",
+  dpoNote:"No processor, no transfer to third countries, nothing is transmitted. Classifying your own processing under GDPR or the Swiss FADP remains with the controller.",
+  conH:"Contact",
+  conL1:"Support and rollouts", conL2:"Bugs and requests",
+  conLede:"Questions about the app, support, institutional rollouts or adaptations to a workflow: write to us on LinkedIn.",
+  conBtn:"B/IAS on LinkedIn", conIssue:"Issue tracker on GitHub",
+  conAlt:"As an issue in the GitHub repository, where they can be followed.",
+  footDev:"PrepareAudio is an app by B/IAS, developed in Basel.",
+  footSrc:"Source code", footThird:"Component licences", footFont:"Typeface: Recursive, SIL OFL 1.1",
+  footNoTrack:"This page sets no cookies and measures nothing."
+},
+fr:{
+  navGuide:"Mode d'emploi", navDpo:"Protection des données",
+  h1:"Les fragments d'enregistrement deviennent des conversations entières et synchrones.",
+  lede:"Les enregistreurs audio découpent les longs enregistrements en morceaux, et deux émetteurs ne tournent jamais tout à fait pareil. PrepareAudio assemble les fragments WAV sans perte, superpose les sources audio en synchronie et masterise le résultat en MP3 à −16 LUFS. Tout sur votre Mac : pas de compte, pas de cloud, pas de ffmpeg à installer.",
+  cta:"Télécharger pour macOS", ctaGuide:"Lire le guide",
+  req:"Pour Mac avec Apple Silicon, macOS 12 ou plus récent · 8 Mo · signé et notarisé · allemand, anglais, français, italien · gratuit et open source, AGPL-3.0",
+  altHero:"Timeline de PrepareAudio : clips stéréo de deux émetteurs au centre, clips mono poussés vers l'extérieur",
+  altMerge:"Onglet d'assemblage avec les enregistrements trouvés et leurs fragments",
+  altSync:"Analyse avec paires de pistes, décalage, dérive et taux de concordance",
+  altEdit:"Timeline avec clips coupés et menu contextuel ouvert",
+  altDone:"Carte de fin « 23 sur 23 terminés » avec un bouton vers l'étape suivante",
+  altMaster:"Onglet de mastering avec format et loudness mesurée par fichier",
+  altInfo:"Panneau d'information avec éditeur, liens, choix de la langue et licences",
+  guideH:"Mode d'emploi",
+  guideLede:"Trois onglets, trois étapes : assembler, synchroniser, masteriser. Chacune reprend le résultat de la précédente et s'utilise aussi seule.",
+  g1h:"Assembler les fragments",
+  g1a:"Glissez des dossiers dans la fenêtre ou choisissez un dossier. L'assemblage n'accepte que le WAV, de n'importe quel enregistreur audio. L'application parcourt tous les sous-dossiers, quel que soit leur rangement, et reconnaît les fragments d'un enregistrement à leur heure d'enregistrement : d'après les métadonnées du fichier (Broadcast WAV), le nom du fichier ou la date du fichier.",
+  g1b:"Un fragment suivant a le même format et commence là où finit le fragment complet précédent ; à l'échantillon près quand les métadonnées portent une référence temporelle. Si deux fragments conviennent aussi bien, par exemple avec deux émetteurs, l'audio à la jointure décide : un prédicteur linéaire ne prévoit l'autre côté qu'à la vraie jointure.",
+  g1c:"Le bouton d'assemblage demande où enregistrer et y crée le dossier tracks. Les données audio sont copiées au bit près, en RF64 à partir de 4 Go. Les originaux restent intacts, aucun fichier existant n'est écrasé.",
+  g2h:"Synchroniser les sources audio",
+  g2a:"Déposez le dossier tracks dans le deuxième onglet. En plus du WAV, la synchronisation accepte MP3, M4A/AAC, FLAC, ALAC, AIFF, CAF et OGG et les décode une fois pour que l'aperçu et la timeline restent fluides ; les résultats sont en WAV. L'application cherche des événements communs avec un décalage fixe : syllabes, chaises qui raclent, vaisselle. La ressemblance sonore n'aide pas, car avec deux micros-cravates la voix la plus forte est souvent opposée.",
+  g2b:"Pour chaque paire de pistes, elle mesure décalage, dérive d'horloge et dispersion, et vérifie par fenêtres de 20 secondes si les événements concordent. Les passages communs deviennent stéréo. Ils ne sont séparés que si les deux émetteurs enregistrent en même temps des conversations différentes. Si un seul émetteur tourne, cela reste dans le fichier stéréo.",
+  g3h:"Modifier dans la timeline",
+  g3a:"La proposition de l'analyse apparaît en timeline. La stéréo est au centre, là où les pistes se rejoignent : le premier émetteur en bleu à gauche, le second en rouge à droite. Le mono est poussé vers l'extérieur et plus clair. Les parties coupées sont hachurées, les événements communs courent en dessous.",
+  g3b:"Rogner et prolonger aux bords, couper, joindre, supprimer et rétablir, passer en stéréo ou en mono. Déplacer dans le temps est impossible : la position mesurée de chaque piste reste fixe, les deux émetteurs restent synchrones.",
+  k1:"lire et mettre en pause, avec écoute sur le haut-parleur",
+  k2:"couper à la tête de lecture",
+  k3:"joindre au clip suivant",
+  k4:"supprimer ou rétablir",
+  k5:"passer en stéréo ou en mono",
+  k6:"annuler et rétablir",
+  g3c:"Chaque modification recalcule aussitôt la liste de sortie. La modification est gardée dans un petit fichier à côté des sources et revient à la prochaine ouverture.",
+  g4h:"Enregistrer",
+  g4a:"Le bouton Créer demande un emplacement et écrit le dossier sync avec des WAV stéréo et mono. Pendant le calcul, une roue tourne, et le pourcentage ne compte que le travail terminé.",
+  g4b:"Ensuite la liste se vide et indique « x sur x terminés ». Ce qui a échoué reste, avec un bouton pour réessayer. Les trois onglets fonctionnent ainsi.",
+  g5h:"Masteriser en MP3",
+  g5a:"Le troisième onglet accepte le WAV, y compris RF64 et 32 bits flottants, ainsi que MP3, M4A, FLAC, ALAC, AIFF, CAF et OGG. Il affiche format, profondeur, fréquence et canaux et mesure la loudness selon EBU R128.",
+  m1:"gain fixe vers −16 LUFS, sans compression",
+  m2:"limiteur à anticipation à −1,5 dBTP, y compris pour les crêtes entre échantillons",
+  m3:"MP3 à 192 kbit/s, le mono reste mono",
+  m4:"le MP3 terminé est remesuré et réencodé en cas d'écart",
+  g5b:"Le résultat se trouve dans le dossier master, prêt pour la transcription.",
+  g6h:"Informations, langue et licences",
+  g6a:"Le i en haut à droite affiche version, éditeur, liens vers bias.city et le code source, et chaque composant livré avec son texte de licence. C'est aussi là que vous choisissez la langue : allemand, anglais, français ou italien. Rien n'est à installer ; Symphonia lit les formats, ebur128 mesure, LAME est compilé dans l'application, cpal joue l'aperçu.",
+  licH:"Pourquoi gratuit",
+  licLede:"Nous avons construit l'application pour nos propres enregistrements. Elle a le plus de valeur quand beaucoup peuvent l'utiliser.",
+  l1h:"AGPL-3.0", l1p:"Qui modifie et redistribue l'application doit publier son code aussi. Cela vous protège d'une variante fermée sous le même nom.",
+  l2h:"Pas de niveau Pro", l2p:"Assemblage, synchronisation, timeline et mastering. Rien à débloquer, rien qui devienne payant plus tard.",
+  l3h:"Ce qui coûte", l3p:"Le support, les déploiements institutionnels et les adaptations à des flux de travail précis. C'est cela qui finance le développement, pas le téléchargement.",
+  proofsH:"Ce que vous pouvez vérifier vous-même",
+  p1a:"Seul un fragment complet a une suite.", p1b:"Ainsi, un court enregistrement d'un émetteur ne se colle jamais au début de l'autre. Le contrôle de la jointure a été mesuré sur 38 jointures réelles.",
+  p2a:"Contre-épreuves sans concordance.", p2b:"Décalés de 47 secondes ou issus d'enregistrements indépendants, les contrôles ont donné 0 % de concordance et une cohérence de 0,005 au plus. Les vraies phases communes atteignaient 76 à 100 %.",
+  p3a:"Mesuré, pas estimé.", p3b:"Sur un vrai enregistrement en 32 bits flottants, la mesure intégrée s'écarte de moins de 0,05 LU de ffmpeg loudnorm. Chaque MP3 est remesuré après l'encodage.",
+  p4a:"Développer et compiler soi-même.", p4b:"Le dépôt contient toute la chaîne de build jusqu'à l'application signée. Qui ne fait pas confiance au binaire compile.",
+  dpoH:"Protection des données",
+  dpoLede:"PrepareAudio traite des enregistrements de conversations. Tout reste donc sur votre ordinateur : l'application n'ouvre elle-même aucune connexion réseau, ni pour la télémétrie, ni pour les mises à jour, ni pour les rapports de plantage.",
+  flowT:"Flux de données",
+  d1:"<b>Entrée :</b> fragments WAV et fichiers audio du système de fichiers local, en lecture seule.",
+  d2:"<b>Traitement :</b> dans le processus de l'application, sur votre Mac. Pas de programme auxiliaire, pas de cloud.",
+  d3:"<b>Stockage :</b> les dossiers tracks, sync et master là où vous les enregistrez ; la modification de la timeline dans un petit fichier JSON à côté des sources ; les copies décodées des MP3 et autres dans le cache de l'application (~/Library/Caches/city.bias.prepareaudio).",
+  d4:"<b>Aperçu :</b> par la sortie audio par défaut. Rien n'est enregistré.",
+  d5:"<b>Réseau :</b> aucune connexion. Seuls les liens du panneau d'information ouvrent le navigateur au clic.",
+  yoursH:"Ce qui reste de votre responsabilité",
+  y1:"Le consentement et l'information des personnes enregistrées.",
+  y2:"Le chiffrement du disque, par exemple avec FileVault.",
+  y3:"Les délais de conservation des originaux, des trois dossiers de résultats et du cache ; l'application supprime les fichiers de cache inutilisés après 30 jours.",
+  y4:"La destination des résultats ensuite, par exemple une transcription.",
+  dpoNote:"Pas de sous-traitant, pas de transfert vers un pays tiers, rien n'est transmis. La qualification de votre propre traitement selon le RGPD ou la nLPD reste du ressort du responsable du traitement.",
+  conH:"Contact",
+  conL1:"Support et déploiements", conL2:"Bugs et souhaits",
+  conLede:"Questions sur l'application, support, déploiements institutionnels ou adaptations à un flux de travail : écrivez-nous sur LinkedIn.",
+  conBtn:"B/IAS sur LinkedIn", conIssue:"Suivi des issues sur GitHub",
+  conAlt:"Comme issue dans le dépôt GitHub, où elles restent traçables.",
+  footDev:"PrepareAudio est une application du B/IAS, développée à Bâle.",
+  footSrc:"Code source", footThird:"Licences des composants", footFont:"Police : Recursive, SIL OFL 1.1",
+  footNoTrack:"Cette page ne dépose aucun cookie et ne mesure rien."
+},
+it:{
+  navGuide:"Guida", navDpo:"Protezione dei dati",
+  h1:"I frammenti di registrazione diventano conversazioni intere e sincronizzate.",
+  lede:"I registratori audio tagliano le registrazioni lunghe in pezzi, e due trasmettitori non vanno mai esattamente uguali. PrepareAudio unisce i frammenti WAV senza perdite, sovrappone le sorgenti audio in sincrono e masterizza il risultato in MP3 a −16 LUFS. Tutto sul tuo Mac: nessun account, nessun cloud, nessun ffmpeg da installare.",
+  cta:"Scarica per macOS", ctaGuide:"Leggi la guida",
+  req:"Per Mac con Apple Silicon, macOS 12 o successivo · 8 MB · firmata e notarizzata · tedesco, inglese, francese, italiano · gratuita e open source, AGPL-3.0",
+  altHero:"Timeline di PrepareAudio: clip stereo di due trasmettitori al centro, clip mono spostate verso l'esterno",
+  altMerge:"Scheda di unione con le registrazioni trovate e i loro frammenti",
+  altSync:"Analisi con coppie di tracce, sfasamento, deriva e quota di corrispondenze",
+  altEdit:"Timeline con clip divise e menu contestuale aperto",
+  altDone:"Scheda finale «23 di 23 completati» con un pulsante per il passo successivo",
+  altMaster:"Scheda di mastering con formato e loudness misurata per file",
+  altInfo:"Pannello info con editore, link, scelta della lingua e licenze",
+  guideH:"Guida all'uso",
+  guideLede:"Tre schede, tre passi: unire, sincronizzare, masterizzare. Ognuno prende il risultato del precedente e funziona anche da solo.",
+  g1h:"Unire i frammenti",
+  g1a:"Trascina le cartelle nella finestra oppure scegli una cartella. L'unione accetta solo WAV, da qualsiasi registratore audio. L'app cerca in tutte le sottocartelle, comunque siano ordinate, e riconosce i frammenti di una registrazione dall'ora di registrazione: dai metadati del file (Broadcast WAV), dal nome del file o dalla data del file.",
+  g1b:"Un frammento successivo ha lo stesso formato e inizia dove finisce il frammento completo precedente; al campione esatto quando i metadati portano un riferimento temporale. Se due frammenti vanno ugualmente bene, per esempio con due trasmettitori, decide l'audio alla giunzione: un predittore lineare prevede l'altro lato solo alla giunzione vera.",
+  g1c:"Il pulsante di unione chiede dove salvare e vi crea la cartella tracks. I dati audio vengono copiati bit per bit, in RF64 da 4 GB. Gli originali restano intatti, i file esistenti non vengono mai sovrascritti.",
+  g2h:"Sincronizzare le sorgenti audio",
+  g2a:"Trascina la cartella tracks nella seconda scheda. Oltre al WAV, la sincronizzazione accetta MP3, M4A/AAC, FLAC, ALAC, AIFF, CAF e OGG e li decodifica una volta, così anteprima e timeline restano fluide; i risultati sono WAV. L'app cerca eventi comuni con uno sfasamento fisso: sillabe, sedie spostate, stoviglie. La somiglianza del suono non aiuta, perché con due microfoni a clip la voce più forte è spesso opposta.",
+  g2b:"Per ogni coppia di tracce misura sfasamento, deriva dell'orologio e dispersione e verifica in finestre da 20 secondi se gli eventi coincidono. I tratti comuni diventano stereo. Vengono separati solo quando i due trasmettitori registrano contemporaneamente conversazioni diverse. Se funziona un solo trasmettitore, resta nel file stereo.",
+  g3h:"Modificare nella timeline",
+  g3a:"La proposta dell'analisi appare come timeline. Lo stereo sta al centro, dove le tracce si incontrano: il primo trasmettitore in blu a sinistra, il secondo in rosso a destra. Il mono è spostato verso l'esterno e più chiaro. Le parti tagliate sono tratteggiate, sotto scorrono gli eventi comuni.",
+  g3b:"Rifilare ed estendere ai bordi, dividere, congiungere, eliminare e ripristinare, spostare su stereo o mono. Spostare nel tempo non è possibile: la posizione misurata di ogni traccia resta fissa, i due trasmettitori restano sincronizzati.",
+  k1:"riprodurre e mettere in pausa, con anteprima dall'altoparlante",
+  k2:"dividere alla testina",
+  k3:"congiungere alla clip successiva",
+  k4:"eliminare o ripristinare",
+  k5:"spostare su stereo o mono",
+  k6:"annullare e ripetere",
+  g3c:"Ogni modifica ricalcola subito l'elenco dei file in uscita. La modifica resta in un piccolo file accanto alle sorgenti e torna alla prossima apertura.",
+  g4h:"Salvare",
+  g4a:"Il pulsante Crea chiede dove salvare e scrive la cartella sync con WAV stereo e mono. Durante il calcolo gira una ruota, e la percentuale conta solo il lavoro concluso.",
+  g4b:"Poi l'elenco si svuota e riporta «x di x completati». Ciò che non è riuscito resta, con un pulsante per riprovare. Le tre schede funzionano così.",
+  g5h:"Masterizzare in MP3",
+  g5a:"La terza scheda accetta WAV, anche RF64 e 32 bit float, oltre a MP3, M4A, FLAC, ALAC, AIFF, CAF e OGG. Mostra formato, profondità, frequenza e canali e misura la loudness secondo EBU R128.",
+  m1:"guadagno fisso a −16 LUFS, senza compressione",
+  m2:"limiter con look-ahead a −1,5 dBTP, anche per i picchi tra i campioni",
+  m3:"MP3 a 192 kbit/s, il mono resta mono",
+  m4:"l'MP3 finito viene rimisurato e ricodificato se si discosta",
+  g5b:"Il risultato si trova nella cartella master, pronto per la trascrizione.",
+  g6h:"Info, lingua e licenze",
+  g6a:"La i in alto a destra mostra versione, editore, link a bias.city e al codice sorgente, e ogni componente incluso con il suo testo di licenza. Lì scegli anche la lingua: tedesco, inglese, francese o italiano. Non serve installare nulla; Symphonia legge i formati, ebur128 misura, LAME è compilato nell'app, cpal riproduce l'anteprima.",
+  licH:"Perché gratuita",
+  licLede:"Abbiamo costruito l'app per le nostre registrazioni. Ha il massimo valore d'uso quando in molti possono usarla.",
+  l1h:"AGPL-3.0", l1p:"Chi modifica e ridistribuisce l'app deve pubblicare anche il proprio codice. Questo ti protegge da una variante chiusa con lo stesso nome.",
+  l2h:"Nessun livello Pro", l2p:"Unione, sincronizzazione, timeline e mastering. Niente da sbloccare e niente che diventi a pagamento più avanti.",
+  l3h:"Cosa costa", l3p:"Supporto, installazioni per istituti e adattamenti a flussi di lavoro specifici. È questo che finanzia lo sviluppo, non il download.",
+  proofsH:"Cosa puoi verificare da te",
+  p1a:"Solo un frammento completo ha un seguito.", p1b:"Così una breve registrazione di un trasmettitore non si attacca mai all'inizio dell'altro. Il controllo della giunzione è stato misurato su 38 giunzioni reali.",
+  p2a:"Controlli senza corrispondenze.", p2b:"Sfasati di 47 secondi o presi da registrazioni indipendenti, i controlli hanno dato 0 % di corrispondenze e una coerenza di al massimo 0,005. Le vere fasi comuni arrivavano dal 76 al 100 %.",
+  p3a:"Misurato, non stimato.", p3b:"Su una vera registrazione a 32 bit float la misura integrata si discosta da ffmpeg loudnorm di meno di 0,05 LU. Ogni MP3 viene rimisurato dopo la codifica.",
+  p4a:"Svilupparla e compilarla da sé.", p4b:"Il repository contiene l'intera catena di build fino all'app firmata. Chi non si fida del binario compila.",
+  dpoH:"Protezione dei dati",
+  dpoLede:"PrepareAudio elabora registrazioni di conversazioni. Per questo tutto resta sul tuo computer: l'app non apre da sé alcuna connessione di rete, né per telemetria, né per aggiornamenti, né per rapporti di arresto.",
+  flowT:"Flusso dei dati",
+  d1:"<b>Ingresso:</b> frammenti WAV e file audio dal file system locale, solo in lettura.",
+  d2:"<b>Elaborazione:</b> nel processo dell'app, sul tuo Mac. Nessun programma ausiliario, nessun cloud.",
+  d3:"<b>Archiviazione:</b> le cartelle tracks, sync e master dove le salvi; la modifica della timeline in un piccolo file JSON accanto alle sorgenti; le copie decodificate di MP3 e simili nella cache dell'app (~/Library/Caches/city.bias.prepareaudio).",
+  d4:"<b>Anteprima:</b> tramite l'uscita audio predefinita. Non viene registrato nulla.",
+  d5:"<b>Rete:</b> nessuna connessione. Solo i link nel pannello info aprono il browser con un clic.",
+  yoursH:"Cosa resta di tua responsabilità",
+  y1:"Consenso e informazione delle persone registrate.",
+  y2:"Cifratura del disco, per esempio con FileVault.",
+  y3:"Tempi di conservazione degli originali, delle tre cartelle di risultati e della cache; l'app elimina i file di cache inutilizzati dopo 30 giorni.",
+  y4:"Dove vanno poi i risultati, per esempio in una trascrizione.",
+  dpoNote:"Nessun responsabile esterno, nessun trasferimento verso paesi terzi, non viene trasmesso nulla. L'inquadramento del proprio trattamento secondo il GDPR o la nLPD resta al titolare.",
+  conH:"Contatto",
+  conL1:"Supporto e installazioni", conL2:"Errori e richieste",
+  conLede:"Domande sull'app, supporto, installazioni per istituti o adattamenti a un flusso di lavoro: scrivici su LinkedIn.",
+  conBtn:"B/IAS su LinkedIn", conIssue:"Issue tracker su GitHub",
+  conAlt:"Come issue nel repository GitHub, dove restano tracciabili.",
+  footDev:"PrepareAudio è un'app del B/IAS, sviluppata a Basilea.",
+  footSrc:"Codice sorgente", footThird:"Licenze dei componenti", footFont:"Carattere: Recursive, SIL OFL 1.1",
+  footNoTrack:"Questa pagina non imposta cookie e non misura nulla."
+}
+};
+
+/* Schlüssel, deren Text Auszeichnung enthält — nur diese als HTML. */
+const HTML_KEYS = new Set(['d1','d2','d3','d4','d5']);
+
+function setLang(l, inDieUrl){
+  const t = T[l] || T.de;
+  document.documentElement.lang = l;
+  document.querySelectorAll('[data-t]').forEach(el=>{
+    const k = el.dataset.t;
+    const v = (k in t) ? t[k] : T.de[k];
+    if(v === undefined) return;
+    if(HTML_KEYS.has(k)) el.innerHTML = v; else el.textContent = v;
+  });
+  /* Bildschirmfotos gibt es je Sprache: img/<name>-<lang>.png */
+  document.querySelectorAll('img[data-img], img[data-alt]').forEach(im=>{
+    if(im.dataset.img) im.src = 'img/' + im.dataset.img + '-' + l + '.png';
+    const a = im.dataset.alt;
+    if(a) im.alt = (a in t) ? t[a] : (T.de[a] || im.alt);
+  });
+  document.querySelectorAll('.langs button').forEach(b=>
+    b.setAttribute('aria-pressed', String(b.dataset.lang===l)));
+  /* Sprache in ?lang=, der Hash gehört den Abschnitten. */
+  if(inDieUrl){
+    try{
+      const u = new URL(location.href);
+      u.searchParams.set('lang', l);
+      history.replaceState(null, '', u);
+    }catch(e){}
+  }
+}
+
+document.querySelectorAll('.langs button').forEach(b=>
+  b.addEventListener('click', ()=>setLang(b.dataset.lang, true)));
+
+const ausUrl = new URLSearchParams(location.search).get('lang');
+const ausBrowser = (navigator.language || 'de').slice(0,2);
+setLang(T[ausUrl] ? ausUrl : T[ausBrowser] ? ausBrowser : 'de', false);
+</script>
+</body>
+</html>

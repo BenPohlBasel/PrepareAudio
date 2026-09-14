@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Tauri mischt diese Datei in das erzeugte Info.plist.
+  Die App spricht Deutsch, Englisch, Französisch und Italienisch (docs/I18N.md).
+  Mit den Lokalisierungen zeigt macOS auch die eigenen Dialoge (Ordnerwahl)
+  in der Sprache des Systems.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>de</string>
+    <string>en</string>
+    <string>fr</string>
+    <string>it</string>
+  </array>
+  <key>CFBundleAllowMixedLocalizations</key>
+  <true/>
+</dict>
+</plist>

@@ -181,7 +181,7 @@ def main():
 
     app_license = read(os.path.join(ROOT, "LICENSE"))
     out = {
-        "app": {"name": "PrepareAudio", "version": root["version"], "license": root.get("license") or "MIT",
+        "app": {"name": "PrepareAudio", "version": root["version"], "license": root.get("license") or "AGPL-3.0-or-later",
                 "authors": root.get("authors") or [], "license_text": app_license},
         "generated_for": a.target,
         "crates": crates,
@@ -193,7 +193,7 @@ def main():
     lines = [
         "# Drittanbieter-Lizenzen · PrepareAudio",
         "",
-        f'PrepareAudio {root["version"]} steht unter der MIT-Lizenz (siehe LICENSE). Die App enthält die folgenden '
+        f'PrepareAudio {root["version"]} ist freie Software unter der GNU AGPL, Version 3 oder später (siehe LICENSE). Die App enthält die folgenden '
         f"{len(crates)} Softwarepakete (Stand dieses Builds, Ziel {a.target}). Die macOS-WebView wird vom System gestellt und ist nicht Teil der App.",
         "",
         "| Paket | Version | Lizenz | Quelle |",

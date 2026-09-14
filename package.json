@@ -1,7 +1,7 @@
 {
   "name": "prepareaudio",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
@@ -11,6 +11,6 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"
   },
-  "license": "MIT",
-  "author": "Ben Pohl"
+  "license": "AGPL-3.0-or-later",
+  "author": "B/IAS – Basel Institut für angewandte Stadtforschung"
 }

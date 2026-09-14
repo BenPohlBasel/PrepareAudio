@@ -1,9 +1,9 @@
 [package]
 name = "prepare-audio"
-version = "0.1.0"
+version = "0.2.0"
 description = "PrepareAudio: DJI-Mic-2-Aufnahmen zusammenfuegen, synchronisieren und mastern"
-authors = ["Ben Pohl"]
-license = "MIT"
+authors = ["B/IAS – Basel Institut für angewandte Stadtforschung"]
+license = "AGPL-3.0-or-later"
 edition = "2021"
 
 [lib]
@@ -22,6 +22,7 @@ libc = "0.2"
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "aiff", "ogg", "vorbis", "alac", "wav", "pcm", "caf"] }
 ebur128 = "0.1"
 mp3lame-encoder = "0.2"
+cpal = "0.16"
 
 [profile.release]
 opt-level = 3

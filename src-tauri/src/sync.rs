@@ -25,22 +25,23 @@
 //! Gemeinsame Phasen werden Stereo (links der kleinere Sendername), alles andere
 //! bleibt je Sender Mono.
 
-use crate::merge::{available_bytes, human_bytes, Outcome, Progress, Status, Summary};
+use crate::decode;
+use crate::i18n::{self, t, tf, Msg};
+use crate::merge::{available_bytes, low_space, Outcome, Progress, Status, Summary};
 use crate::scan::{self, civil_from_secs, days_from_civil, Skipped};
 use crate::wav::{self, WavInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::f64::consts::{FRAC_1_SQRT_2, PI, TAU};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const OUTPUT_DIR_NAME: &str = "sync";
-const CANCELLED: &str = "Abgebrochen.";
 
 const ENV_RATE: f64 = 1000.0;
 const BANDS: [(f64, f64); 4] = [(150.0, 400.0), (400.0, 1000.0), (1000.0, 2500.0), (2500.0, 7000.0)];
@@ -113,6 +114,13 @@ pub struct Track {
     pub segments: Vec<Segment>,
     #[serde(skip)]
     pub frames: u64,
+    /// Container of a non-WAV source ("MP3", "M4A", …); its audio is read from `decoded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decoded_from: Option<String>,
+    /// The cached 32-bit float WAV decoded from `path` (non-WAV sources only). `path` stays the
+    /// original file for names, labels and the edit file; all audio is read through `segments`.
+    #[serde(skip)]
+    pub decoded: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,7 +192,7 @@ pub struct Span {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Item {
+pub struct Draft {
     pub id: usize,
     pub kind: &'static str,
     pub name: String,
@@ -215,17 +223,111 @@ pub struct Item {
     pub start_secs: i64,
 }
 
+/// Placement of a track on the day's timeline: timeline second `t` (absolute,
+/// on the anchoring recorder's clock) is second `(t − p) · s` of the track.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct Place {
+    pub p: f64,
+    pub s: f64,
+}
+
+impl Place {
+    pub fn to_track(&self, t: f64) -> f64 {
+        (t - self.p) * self.s
+    }
+    pub fn to_timeline(&self, tau: f64) -> f64 {
+        self.p + tau / self.s
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipMode {
+    Stereo,
+    Mono,
+}
+
+/// A stretch of one track (seconds in the track) and where it goes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Clip {
+    pub track: usize,
+    pub t0: f64,
+    pub t1: f64,
+    pub mode: ClipMode,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+/// Part of an output channel: a track between two timeline seconds.
+#[derive(Debug, Clone, Serialize)]
+pub struct Source {
+    pub track: usize,
+    pub t0: f64,
+    pub t1: f64,
+}
+
+/// One output file.
+#[derive(Debug, Clone, Serialize)]
+pub struct Item {
+    pub id: usize,
+    pub kind: &'static str,
+    pub name: String,
+    pub day: String,
+    pub start: String,
+    pub end: String,
+    /// Seconds since midnight on the timeline where the file starts.
+    pub clock0: f64,
+    pub duration: f64,
+    pub left: usize,
+    pub right: Option<usize>,
+    /// Stereo: absolute timeline seconds. Mono: seconds in the track `left`.
+    pub t0: f64,
+    pub t1: f64,
+    pub left_sources: Vec<Source>,
+    pub right_sources: Vec<Source>,
+    /// Seconds in which a channel of this stereo file has no recording.
+    pub dropout: f64,
+    pub silent: Vec<Silence>,
+    pub hit_share: Option<f64>,
+    pub msc: Option<f64>,
+    pub bytes: u64,
+    /// "gemeinsam", "getrennt" or "allein".
+    pub reason: &'static str,
+    #[serde(skip)]
+    pub start_secs: i64,
+    #[serde(skip)]
+    pub rate: u32,
+}
+
+/// Waveform peaks of a track: level k holds the maximum of 10^k milliseconds,
+/// coded 0–255 for −60…0 dBFS.
+#[derive(Debug, Default)]
+pub struct Peaks {
+    pub levels: Vec<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncPlan {
     pub roots: Vec<String>,
     pub default_out_dir: String,
-    /// "tracks" (files from the first function) or "chunks" (raw DJI parts).
+    /// "tracks" (files from the first function), "chunks" (raw DJI parts) or "mixed".
     pub source: &'static str,
     pub labels: Vec<String>,
     pub tracks: Vec<Track>,
     pub pairs: Vec<Pair>,
+    pub places: Vec<Place>,
+    /// Current edit state (analysis proposal or the user's edits).
+    pub clips: Vec<Clip>,
+    /// The clips differ from the analysis proposal (and are saved next to the sources).
+    pub edited: bool,
     pub items: Vec<Item>,
     pub ignored: Vec<Skipped>,
+    /// Gain that brings each track to a comfortable listening level for previews.
+    pub preview_gain_db: Vec<f32>,
+    #[serde(skip)]
+    pub analysis_clips: Vec<Clip>,
+    #[serde(skip)]
+    pub peaks: Vec<Arc<Peaks>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -264,8 +366,16 @@ fn stamp(start: i64, dur: i64) -> String {
 
 /// Parses names written by the first function: `yymmdd_SHHMMSS-EHHMMSS_DHHMMSS_<label>.wav`.
 pub fn parse_track_name(name: &str) -> Option<(i64, String)> {
+    if name.len() < 36 || !name.to_ascii_lowercase().ends_with(".wav") {
+        return None;
+    }
+    parse_track_stem(&name[..name.len() - 4])
+}
+
+/// The same name without its extension (also a track or output converted to another format).
+fn parse_track_stem(name: &str) -> Option<(i64, String)> {
     let b = name.as_bytes();
-    if b.len() < 36 || !name.to_ascii_lowercase().ends_with(".wav") {
+    if b.len() < 32 {
         return None;
     }
     if &b[6..8] != b"_S" || &b[14..16] != b"-E" || &b[22..24] != b"_D" || b[30] != b'_' {
@@ -282,7 +392,7 @@ pub fn parse_track_name(name: &str) -> Option<(i64, String)> {
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || s > 59 {
         return None;
     }
-    let label = &name[31..name.len() - 4];
+    let label = name.get(31..)?;
     if label.is_empty() {
         return None;
     }
@@ -298,6 +408,8 @@ fn is_wav(p: &Path) -> bool {
     !name.starts_with("._") && p.extension().map_or(false, |e| e.eq_ignore_ascii_case("wav"))
 }
 
+/// Collects WAV files and other decodable audio files. Result folders of this
+/// step (`sync`) and of mastering (`master`, MP3 copies of outputs) are skipped.
 fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > 24 {
         return;
@@ -311,10 +423,10 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         let Ok(ft) = e.file_type() else { continue };
         let path = e.path();
         if ft.is_dir() {
-            if name != OUTPUT_DIR_NAME {
+            if name != OUTPUT_DIR_NAME && name != crate::master::OUTPUT_DIR_NAME {
                 walk(&path, depth + 1, out);
             }
-        } else if ft.is_file() && is_wav(&path) {
+        } else if ft.is_file() && (is_wav(&path) || decode::is_compressed(&path)) {
             out.push(path);
         }
     }
@@ -340,11 +452,18 @@ fn make_track(name: String, path: String, label: String, start_secs: i64, info: 
         info,
         segments,
         frames,
+        decoded_from: None,
+        decoded: None,
     }
 }
 
 struct Loaded {
     tracks: Vec<Track>,
+    /// Tracks from files of step 1 and from raw chunks (decoded files come later).
+    from_files: usize,
+    from_parts: usize,
+    /// Non-WAV audio files, decoded in the analysis before they become tracks.
+    compressed: Vec<PathBuf>,
     ignored: Vec<Skipped>,
     roots: Vec<PathBuf>,
     source: &'static str,
@@ -366,13 +485,13 @@ fn load(inputs: &[PathBuf]) -> Result<Loaded, String> {
                     roots.push(p.to_path_buf());
                 }
             }
-            if is_wav(input) {
+            if is_wav(input) || decode::is_compressed(input) {
                 files.push(input.clone());
             }
         }
     }
     if roots.is_empty() {
-        return Err("Keine Ordner oder Dateien angegeben.".into());
+        return Err(t(Msg::NoFoldersOrFiles).into());
     }
     files.sort();
     files.dedup();
@@ -380,8 +499,17 @@ fn load(inputs: &[PathBuf]) -> Result<Loaded, String> {
     let mut tracks = Vec::new();
     let mut ignored = Vec::new();
     let mut others = Vec::new();
+    let mut compressed = Vec::new();
     for f in files {
         let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if decode::is_compressed(&f) {
+            // Converted copies of this step's outputs (e.g. mastered MP3s) are not sources.
+            let stem = f.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if !parse_track_stem(&stem).map_or(false, |(_, label)| is_output_label(&label)) {
+                compressed.push(f);
+            }
+            continue;
+        }
         match parse_track_name(&name) {
             Some((_, label)) if is_output_label(&label) => {}
             Some((start, label)) => match wav::read_info(&f) {
@@ -389,26 +517,22 @@ fn load(inputs: &[PathBuf]) -> Result<Loaded, String> {
                     let seg = vec![Segment { path: f.clone(), offset: info.data_offset, len: info.data_len }];
                     tracks.push(make_track(name, f.display().to_string(), label, start, info, seg));
                 }
-                Ok(_) => ignored.push(Skipped { path: f.display().to_string(), reason: "Audioformat wird nicht unterstützt".into() }),
-                Err(e) => ignored.push(Skipped { path: f.display().to_string(), reason: format!("nicht lesbar: {e}") }),
+                Ok(_) => ignored.push(Skipped { path: f.display().to_string(), reason: t(Msg::AudioFormatUnsupported).into() }),
+                Err(e) => ignored.push(Skipped { path: f.display().to_string(), reason: tf(Msg::UnreadableWith, &[("e", &e)]) }),
             },
             None => others.push(f),
         }
     }
     let from_files = tracks.len();
 
-    // Recordings that exist only as DJI parts (no merged track yet) are used directly.
+    // Every other WAV is raw recorder audio: grouped into recordings exactly as in
+    // step 1 (metadata, name or file time, seam check). Chains become one track,
+    // single files a track of their own. Recordings already merged are skipped.
     let mut from_parts = 0;
-    let has_parts = others.iter().any(|f| scan::parse_dji_name(&f.file_name().unwrap_or_default().to_string_lossy()).is_some());
-    if has_parts {
-        let s = scan::scan(inputs, &scan::Options::default())?;
+    if !others.is_empty() {
+        let s = scan::scan(&others, &scan::Options::default())?;
         ignored.extend(s.duplicates);
-        for sk in s.ignored {
-            let name = Path::new(&sk.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if parse_track_name(&name).is_none() {
-                ignored.push(sk);
-            }
-        }
+        ignored.extend(s.ignored);
         for r in s.recordings {
             let merged = tracks[..from_files]
                 .iter()
@@ -418,7 +542,7 @@ fn load(inputs: &[PathBuf]) -> Result<Loaded, String> {
             }
             let info = r.parts[0].info.clone();
             if info.sample_kind().is_none() {
-                ignored.push(Skipped { path: r.parts[0].path.clone(), reason: "Audioformat wird nicht unterstützt".into() });
+                ignored.push(Skipped { path: r.parts[0].path.clone(), reason: t(Msg::AudioFormatUnsupported).into() });
                 continue;
             }
             let segments = r
@@ -429,18 +553,129 @@ fn load(inputs: &[PathBuf]) -> Result<Loaded, String> {
             tracks.push(make_track(r.out_name.clone(), r.parts[0].path.clone(), r.label.clone(), r.start_secs, info, segments));
             from_parts += 1;
         }
-    } else {
-        for f in others {
-            ignored.push(Skipped { path: f.display().to_string(), reason: "weder Track noch DJI-Aufnahme".into() });
+    }
+    let source = source_kind(from_files + compressed.len(), from_parts).ok_or_else(|| t(Msg::NoTracksOrChunks).to_string())?;
+    Ok(Loaded { tracks, from_files, from_parts, compressed, ignored, roots, source })
+}
+
+/// "tracks", "chunks" or "mixed". Decoded audio files count like tracks: whole recordings, never chunks.
+fn source_kind(files: usize, parts: usize) -> Option<&'static str> {
+    match (files > 0, parts > 0) {
+        (true, false) => Some("tracks"),
+        (false, true) => Some("chunks"),
+        (true, true) => Some("mixed"),
+        (false, false) => None,
+    }
+}
+
+/// Start of a non-WAV audio file, best source first: a time in the file name (chunk
+/// pattern, a converted track of step 1, or any date with seconds), the creation
+/// time of an MP4/M4A (only if set, 2010 or later and not after the last change),
+/// else the file dates like step 1 (modification time − duration).
+fn compressed_start(path: &Path, duration: f64) -> Option<i64> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if let Some((_, start)) = scan::parse_chunk_name(&name) {
+        return Some(start);
+    }
+    if let Some((start, _)) = parse_track_stem(&stem) {
+        return Some(start);
+    }
+    if let Some(start) = scan::parse_name_time(&name) {
+        return Some(start);
+    }
+    let meta = fs::metadata(path).ok()?;
+    if matches!(decode::extension(path).as_str(), "m4a" | "mp4") {
+        let modified = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64());
+        if let Some(created) = decode::mp4_creation_time(path) {
+            if civil_from_secs(created).0 >= 2010 && modified.map_or(true, |m| created as f64 <= m + 5.0) {
+                return Some(created + scan::local_offset(created));
+            }
         }
     }
-    let source = match (from_files > 0, from_parts > 0) {
-        (true, false) => "tracks",
-        (false, true) => "chunks",
-        (true, true) => "mixed",
-        (false, false) => return Err("Keine Tracks und keine DJI-Aufnahmen gefunden.".into()),
+    scan::file_start_time(&meta, duration).map(|s| s.floor() as i64)
+}
+
+/// Decodes every non-WAV file once into the cache (or reuses it) and makes it a track.
+/// Failures go to `ignored`; only cancelling and a full cache volume stop the analysis.
+fn decode_sources(
+    paths: &[PathBuf],
+    existing: &[Track],
+    cache: &Path,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&SyncProgress),
+    ignored: &mut Vec<Skipped>,
+) -> Result<Vec<Track>, String> {
+    let mut sources: Vec<(PathBuf, decode::Source)> = Vec::new();
+    for p in paths {
+        match decode::Source::new(p) {
+            Ok(src) => sources.push((p.clone(), src)),
+            Err(e) => ignored.push(Skipped { path: p.display().to_string(), reason: tf(Msg::UnreadableWith, &[("e", &e)]) }),
+        }
+    }
+    let keys: Vec<String> = sources.iter().map(|(_, s)| s.key.clone()).collect();
+    decode::clean_cache(cache, &keys);
+    let hits: Vec<Option<(PathBuf, WavInfo)>> = sources.iter().map(|(_, s)| decode::cached(cache, s)).collect();
+    let need: u64 = sources.iter().zip(&hits).filter(|(_, h)| h.is_none()).map(|((_, s), _)| decode::estimate_decoded_bytes(s)).sum();
+    decode::check_space(cache, need)?;
+
+    let total: u64 = sources.iter().map(|(_, s)| s.size).sum::<u64>().max(1);
+    let read: Vec<Arc<AtomicU64>> = sources.iter().zip(&hits).map(|((_, s), h)| Arc::new(AtomicU64::new(if h.is_some() { s.size } else { 0 }))).collect();
+    let jobs: Vec<usize> = (0..sources.len()).collect();
+    let results = {
+        let (sources, hits, read) = (&sources, &hits, &read);
+        run_parallel(
+            &jobs,
+            &mut || {
+                let done: u64 = read.iter().zip(sources).map(|(r, (_, s))| r.load(Ordering::Relaxed).min(s.size)).sum();
+                progress(&SyncProgress { stage: "decode", done: done.min(total), total, text: t(Msg::ProgressDecode).into() })
+            },
+            &|&i: &usize| match &hits[i] {
+                Some(hit) => Ok(hit.clone()),
+                None => decode::decode_to_cache(cache, &sources[i].1, cancel, read[i].clone()),
+            },
+        )
     };
-    Ok(Loaded { tracks, ignored, roots, source })
+    if cancel.load(Ordering::SeqCst) {
+        return Err(i18n::cancelled());
+    }
+    let mut out: Vec<Track> = Vec::new();
+    for ((orig, src), r) in sources.iter().zip(results) {
+        let shown = orig.display().to_string();
+        let (wav_path, info) = match r {
+            Some(Ok(x)) => x,
+            Some(Err(e)) if i18n::is_cancelled(&e) => return Err(e),
+            Some(Err(e)) => {
+                ignored.push(Skipped { path: shown, reason: e });
+                continue;
+            }
+            None => {
+                ignored.push(Skipped { path: shown, reason: t(Msg::AnalysisFailed).into() });
+                continue;
+            }
+        };
+        let name = orig.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = orig.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(start) = compressed_start(&src.path, info.duration()) else {
+            ignored.push(Skipped { path: shown, reason: t(Msg::Unreadable).into() });
+            continue;
+        };
+        // A converted track of step 1 keeps its label; any other file is labelled by its folder.
+        let label = parse_track_stem(&stem)
+            .map(|(_, l)| l)
+            .unwrap_or_else(|| orig.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        let segments = vec![Segment { path: wav_path.clone(), offset: info.data_offset, len: info.data_len }];
+        let mut track = make_track(name, shown, label, start, info, segments);
+        // The same recording as a WAV track already loaded (e.g. a FLAC copy next to it) is not loaded twice.
+        let copy = existing.iter().chain(&out).any(|t| t.label == track.label && (t.start_secs - track.start_secs).abs() <= 2 && (t.duration - track.duration).abs() <= 2.0);
+        if copy {
+            continue;
+        }
+        track.decoded_from = Some(decode::container(&decode::extension(orig)).to_string());
+        track.decoded = Some(wav_path);
+        out.push(track);
+    }
+    Ok(out)
 }
 
 fn default_out_dir(roots: &[PathBuf]) -> PathBuf {
@@ -640,11 +875,21 @@ struct Env {
     onset: Vec<f32>,
     /// Band energy per millisecond (for levels and quiet cut points).
     loud: Vec<f32>,
+    /// Waveform peak per millisecond, coded like `Peaks`.
+    peak: Vec<u8>,
+}
+
+fn peak_code(v: f64) -> u8 {
+    if v <= 1e-6 {
+        0
+    } else {
+        (((20.0 * v.log10() + 60.0) / 60.0).clamp(0.0, 1.0) * 255.0).round() as u8
+    }
 }
 
 fn envelope(track: &Track, cancel: &AtomicBool, done: &AtomicU64) -> Result<Env, String> {
     let info = &track.info;
-    let kind = info.sample_kind().ok_or("Audioformat wird nicht unterstützt")?;
+    let kind = info.sample_kind().ok_or(t(Msg::AudioFormatUnsupported))?;
     let ch = info.channels as usize;
     let ba = info.block_align as usize;
     let bps = ba / ch;
@@ -660,6 +905,8 @@ fn envelope(track: &Track, cancel: &AtomicBool, done: &AtomicU64) -> Result<Env,
     let mut frame = 0u64;
     let boundary = |k: u64| ((k as f64) * fs / ENV_RATE).round() as u64;
     let mut next = boundary(1);
+    let mut peak = 0f64;
+    let mut peaks = Vec::with_capacity(cap);
     let mut buf = vec![0u8; ba * 65536];
     for seg in &track.segments {
         let mut f = File::open(&seg.path).map_err(|e| format!("{}: {e}", seg.path.display()))?;
@@ -667,7 +914,7 @@ fn envelope(track: &Track, cancel: &AtomicBool, done: &AtomicU64) -> Result<Env,
         let mut remaining = seg.len - seg.len % ba as u64;
         while remaining > 0 {
             if cancel.load(Ordering::Relaxed) {
-                return Err(CANCELLED.into());
+                return Err(i18n::cancelled());
             }
             let n = remaining.min(buf.len() as u64) as usize;
             f.read_exact(&mut buf[..n]).map_err(|e| format!("{}: {e}", seg.path.display()))?;
@@ -682,9 +929,12 @@ fn envelope(track: &Track, cancel: &AtomicBool, done: &AtomicU64) -> Result<Env,
                     let y = flt[1].run(y0);
                     acc[k] += y * y;
                 }
+                peak = peak.max(x.abs());
                 cnt += 1;
                 frame += 1;
                 if frame == next {
+                    peaks.push(peak_code(peak));
+                    peak = 0.0;
                     for k in 0..BANDS.len() {
                         bands[k].push((acc[k] / cnt as f64) as f32);
                         acc[k] = 0.0;
@@ -697,7 +947,9 @@ fn envelope(track: &Track, cancel: &AtomicBool, done: &AtomicU64) -> Result<Env,
             done.fetch_add(n as u64, Ordering::Relaxed);
         }
     }
-    Ok(onset_from_bands(&bands))
+    let mut env = onset_from_bands(&bands);
+    env.peak = peaks;
+    Ok(env)
 }
 
 fn onset_from_bands(bands: &[Vec<f32>]) -> Env {
@@ -723,7 +975,7 @@ fn onset_from_bands(bands: &[Vec<f32>]) -> Env {
             onset[i] += (rise[i] / scale).min(ONSET_CLIP);
         }
     }
-    Env { onset, loud }
+    Env { onset, loud, peak: Vec::new() }
 }
 
 // ------------------------------------------------------------------ global offset
@@ -1207,10 +1459,7 @@ fn analyze_pair(ta: &Track, tb: &Track, ea: &Env, eb: &Env, cancel: &AtomicBool)
         }
     }
     if !p.ok {
-        p.note = Some(
-            if p.n_windows == 0 { "zu wenig gemeinsame Aufnahmezeit" } else { "keine gemeinsamen Ereignisse mit stabilem Versatz" }
-                .to_string(),
-        );
+        p.note = Some(t(if p.n_windows == 0 { Msg::PairTooLittleOverlap } else { Msg::PairNoStableEvents }).to_string());
         let (ov0, ov1) = span(&p, ta, tb);
         if ov1 > ov0 {
             p.phases.push(Phase { kind: "apart", start: ov0, end: ov1, hit_share: None, msc: None });
@@ -1254,8 +1503,26 @@ pub(crate) fn run_parallel<T: Sync, R: Send>(jobs: &[T], progress: &mut dyn FnMu
 }
 
 pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(&SyncProgress)) -> Result<SyncPlan, String> {
-    progress(&SyncProgress { stage: "load", done: 0, total: 1, text: "Suche Tracks".into() });
-    let Loaded { mut tracks, ignored, roots, source } = load(inputs)?;
+    analyze_in(inputs, &decode::cache_dir(), cancel, progress)
+}
+
+/// `analyze` with the folder that holds decoded copies of non-WAV files.
+pub fn analyze_in(inputs: &[PathBuf], cache: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&SyncProgress)) -> Result<SyncPlan, String> {
+    progress(&SyncProgress { stage: "load", done: 0, total: 1, text: t(Msg::ProgressFindTracks).into() });
+    let Loaded { mut tracks, from_files, from_parts, compressed, mut ignored, roots, mut source } = load(inputs)?;
+    if compressed.is_empty() {
+        decode::clean_cache(cache, &[]);
+    } else {
+        let before = ignored.len();
+        let decoded = decode_sources(&compressed, &tracks, cache, cancel, progress, &mut ignored)?;
+        source = match source_kind(from_files + decoded.len(), from_parts) {
+            Some(s) => s,
+            None => {
+                return Err(ignored[before..].first().map_or_else(|| t(Msg::NoTracksOrChunks).to_string(), |x| format!("{}: {}", x.path, x.reason)));
+            }
+        };
+        tracks.extend(decoded);
+    }
     tracks.sort_by(|a, b| a.start_secs.cmp(&b.start_secs).then_with(|| label_order(&a.label, &b.label)));
     for (i, t) in tracks.iter_mut().enumerate() {
         t.id = i;
@@ -1279,9 +1546,8 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         }
     }
 
-    let mut need: Vec<usize> = cands.iter().flat_map(|&(a, b)| [a, b]).collect();
-    need.sort_unstable();
-    need.dedup();
+    // Every track gets an envelope pass: pairs need the onsets, the timeline needs the peaks.
+    let need: Vec<usize> = (0..tracks.len()).collect();
     let total: u64 = need.iter().map(|&i| tracks[i].segments.iter().map(|s| s.len).sum::<u64>()).sum();
     let done = AtomicU64::new(0);
     let env_results = {
@@ -1289,19 +1555,19 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         let done = &done;
         run_parallel(
             &need,
-            &mut || progress(&SyncProgress { stage: "envelope", done: done.load(Ordering::Relaxed), total, text: "Frequenzanalyse der Tracks".into() }),
+            &mut || progress(&SyncProgress { stage: "envelope", done: done.load(Ordering::Relaxed), total, text: t(Msg::ProgressEnvelope).into() }),
             &|i: &usize| envelope(&tracks[*i], cancel, done),
         )
     };
     if cancel.load(Ordering::SeqCst) {
-        return Err(CANCELLED.into());
+        return Err(i18n::cancelled());
     }
     let mut envs: Vec<Option<Env>> = (0..tracks.len()).map(|_| None).collect();
     for (k, r) in env_results.into_iter().enumerate() {
         match r {
             Some(Ok(e)) => envs[need[k]] = Some(e),
             Some(Err(e)) => return Err(e),
-            None => return Err("Analyse fehlgeschlagen.".into()),
+            None => return Err(t(Msg::AnalysisFailed).into()),
         }
     }
 
@@ -1311,7 +1577,7 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         let (tracks, envs, pairs_done) = (&tracks, &envs, &pairs_done);
         run_parallel(
             &cands,
-            &mut || progress(&SyncProgress { stage: "pairs", done: pairs_done.load(Ordering::Relaxed), total: n_pairs, text: "Suche gemeinsame Ereignisse".into() }),
+            &mut || progress(&SyncProgress { stage: "pairs", done: pairs_done.load(Ordering::Relaxed), total: n_pairs, text: t(Msg::ProgressPairs).into() }),
             &|&(a, b): &(usize, usize)| {
                 let p = analyze_pair(&tracks[a], &tracks[b], envs[a].as_ref().unwrap(), envs[b].as_ref().unwrap(), cancel);
                 pairs_done.fetch_add(1, Ordering::Relaxed);
@@ -1320,10 +1586,24 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         )
     };
     if cancel.load(Ordering::SeqCst) {
-        return Err(CANCELLED.into());
+        return Err(i18n::cancelled());
     }
-    let pairs: Vec<Pair> = pair_results.into_iter().map(|r| r.ok_or_else(|| "Analyse fehlgeschlagen.".to_string())).collect::<Result<_, _>>()?;
-    let items = plan_items(&tracks, &pairs);
+    let pairs: Vec<Pair> = pair_results.into_iter().map(|r| r.ok_or_else(|| t(Msg::AnalysisFailed).to_string())).collect::<Result<_, _>>()?;
+    let drafts = plan_items(&tracks, &pairs);
+    let places = placements(&tracks, &pairs, &labels);
+    let analysis_clips = clips_from_drafts(&tracks, &pairs, &drafts);
+    let peaks: Vec<Arc<Peaks>> = envs.iter().map(|e| Arc::new(e.as_ref().map_or_else(Peaks::default, |e| peak_pyramid(&e.peak)))).collect();
+    let preview_gain_db: Vec<f32> = envs.iter().map(|e| e.as_ref().map_or(20.0, |e| preview_gain(&e.loud))).collect();
+    drop(envs);
+    let (clips, edited) = match load_edits(&tracks, &roots[0]) {
+        Some(edits) => {
+            let merged = merge_edits(&tracks, &analysis_clips, edits);
+            let edited = !same_clips(&merged, &analysis_clips);
+            (merged, edited)
+        }
+        None => (analysis_clips.clone(), false),
+    };
+    let items = items_from_clips(&tracks, &pairs, &places, &labels, &clips);
     Ok(SyncPlan {
         default_out_dir: default_out_dir(&roots).display().to_string(),
         roots: roots.iter().map(|r| r.display().to_string()).collect(),
@@ -1331,17 +1611,23 @@ pub fn analyze(inputs: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut
         labels,
         tracks,
         pairs,
+        places,
+        clips,
+        edited,
         items,
         ignored,
+        preview_gain_db,
+        analysis_clips,
+        peaks,
     })
 }
 
-fn stereo_item(a: &Track, b: &Track, pair: usize, t0: f64, t1: f64, ph: &Phase) -> Item {
+fn stereo_item(a: &Track, b: &Track, pair: usize, t0: f64, t1: f64, ph: &Phase) -> Draft {
     let frames = ((t1 - t0) * a.info.sample_rate as f64).round() as u64;
     let start_secs = a.start_secs + t0.round() as i64;
     let dur = (t1 - t0).round() as i64;
     let (c0, c1) = (clock(start_secs), clock(start_secs + dur));
-    Item {
+    Draft {
         id: 0,
         kind: "stereo",
         name: format!("{}_stereo_L-{}_R-{}.wav", stamp(start_secs, dur), a.label, b.label),
@@ -1374,12 +1660,23 @@ fn mono_frames(t: &Track, t0: f64, t1: f64) -> (u64, u64) {
     (f0.min(f1), f1)
 }
 
-fn mono_item(t: &Track, t0: f64, t1: f64, reason: &'static str) -> Item {
+/// Size of a mono output file with frames `f0..f1` of `t`: a bit-exact copy of a mono
+/// track; a multi-channel track (e.g. a stereo phone recording) is written as its
+/// mono mix in 32-bit float, the same mix its stereo side and the analysis use.
+fn mono_bytes(t: &Track, f0: u64, f1: u64) -> u64 {
+    if t.info.channels == 1 {
+        wav::output_size(t.info.fmt.len(), (f1 - f0) * t.info.block_align as u64)
+    } else {
+        wav::output_size(16, (f1 - f0) * 4)
+    }
+}
+
+fn mono_item(t: &Track, t0: f64, t1: f64, reason: &'static str) -> Draft {
     let (f0, f1) = mono_frames(t, t0, t1);
     let start_secs = t.start_secs + t0.round() as i64;
     let dur = (t1 - t0).round() as i64;
     let (c0, c1) = (clock(start_secs), clock(start_secs + dur));
-    Item {
+    Draft {
         id: 0,
         kind: "mono",
         name: format!("{}_mono_{}.wav", stamp(start_secs, dur), t.label),
@@ -1399,13 +1696,13 @@ fn mono_item(t: &Track, t0: f64, t1: f64, reason: &'static str) -> Item {
         silent: Vec::new(),
         hit_share: None,
         msc: None,
-        bytes: wav::output_size(t.info.fmt.len(), (f1 - f0) * t.info.block_align as u64),
+        bytes: mono_bytes(t, f0, f1),
         reason,
         start_secs,
     }
 }
 
-fn plan_items(tracks: &[Track], pairs: &[Pair]) -> Vec<Item> {
+fn plan_items(tracks: &[Track], pairs: &[Pair]) -> Vec<Draft> {
     // Overlap of every analysed pair, per track in its own time.
     let mut overlap: Vec<Vec<(f64, f64, usize)>> = vec![Vec::new(); tracks.len()];
     for (k, p) in pairs.iter().enumerate() {
@@ -1515,7 +1812,7 @@ fn map_time(p: &Pair, from: usize, t: f64) -> f64 {
 }
 
 /// Interval of a stereo item on track `t`'s own clock, if the item can be expressed there.
-fn on_track(it: &Item, pairs: &[Pair], t: usize) -> Option<(f64, f64)> {
+fn on_track(it: &Draft, pairs: &[Pair], t: usize) -> Option<(f64, f64)> {
     if it.reference == t {
         return Some((it.t0, it.t1));
     }
@@ -1528,7 +1825,7 @@ fn on_track(it: &Item, pairs: &[Pair], t: usize) -> Option<(f64, f64)> {
     }
 }
 
-fn rebase(it: &Item, pairs: &[Pair], t: usize) -> Item {
+fn rebase(it: &Draft, pairs: &[Pair], t: usize) -> Draft {
     if it.reference == t {
         return it.clone();
     }
@@ -1543,7 +1840,7 @@ fn rebase(it: &Item, pairs: &[Pair], t: usize) -> Item {
     out
 }
 
-fn partner_label(tracks: &[Track], it: &Item, t: usize) -> String {
+fn partner_label(tracks: &[Track], it: &Draft, t: usize) -> String {
     let own = &tracks[t].label;
     let left = &tracks[it.left].label;
     if left != own {
@@ -1553,7 +1850,7 @@ fn partner_label(tracks: &[Track], it: &Item, t: usize) -> String {
     }
 }
 
-fn add_silence(it: &mut Item, label: String, seconds: f64) {
+fn add_silence(it: &mut Draft, label: String, seconds: f64) {
     it.dropout += seconds;
     match it.silent.iter_mut().find(|s| s.label == label) {
         Some(s) => s.seconds += seconds,
@@ -1562,7 +1859,7 @@ fn add_silence(it: &mut Item, label: String, seconds: f64) {
 }
 
 /// Name, clock and size of a stereo item after its range changed.
-fn refresh_stereo(tracks: &[Track], it: &mut Item) {
+fn refresh_stereo(tracks: &[Track], it: &mut Draft) {
     let r = &tracks[it.reference];
     it.duration = it.t1 - it.t0;
     it.clock0 = r.clock0 + it.t0;
@@ -1579,7 +1876,7 @@ fn refresh_stereo(tracks: &[Track], it: &mut Item) {
 /// Only parallel, different conversations are split. While just one recorder
 /// runs before, after or between shared stretches, that audio stays in the
 /// adjacent stereo file and the other channel is silent, however long it is.
-fn extend_alone(tracks: &[Track], pairs: &[Pair], items: &mut Vec<Item>) {
+fn extend_alone(tracks: &[Track], pairs: &[Pair], items: &mut Vec<Draft>) {
     const TOL: f64 = 0.05;
     loop {
         let mut found = None;
@@ -1633,9 +1930,9 @@ fn extend_alone(tracks: &[Track], pairs: &[Pair], items: &mut Vec<Item>) {
 /// same two recorders, the other kept running: that is a dropout, not two
 /// different situations. The stretches and the gap become one stereo file on
 /// the running recorder's clock, with silence on the missing channel.
-fn merge_dropouts(tracks: &[Track], pairs: &[Pair], items: &mut Vec<Item>) {
+fn merge_dropouts(tracks: &[Track], pairs: &[Pair], items: &mut Vec<Draft>) {
     const TOL: f64 = 0.05;
-    let labels = |i: &Item| (tracks[i.left].label.clone(), i.right.map(|r| tracks[r].label.clone()));
+    let labels = |i: &Draft| (tracks[i.left].label.clone(), i.right.map(|r| tracks[r].label.clone()));
     loop {
         let mut found = None;
         'search: for (g, gap) in items.iter().enumerate() {
@@ -1689,6 +1986,433 @@ fn merge_dropouts(tracks: &[Track], pairs: &[Pair], items: &mut Vec<Item>) {
     }
 }
 
+// ------------------------------------------------------------------ timeline, clips, output rules
+
+const MIN_CLIP_S: f64 = 0.02;
+/// Clip edges closer than this (0.1 ms after mapping through the placements) count as the same instant.
+const SAME_INSTANT_S: f64 = 1e-4;
+const PREVIEW_TARGET_DB: f64 = -20.0;
+pub const EDIT_FILE: &str = ".prepareaudio-sync.json";
+
+/// Places every track on its day's timeline. Tracks joined by synchronous pairs
+/// form a group; the first recorder's earliest track anchors it on its own
+/// clock (so it can be copied bit-exactly) and every other track of the group
+/// follows through the measured offsets and drifts. Tracks without a partner
+/// sit on their own file-name clock. Edits never change placements.
+pub fn placements(tracks: &[Track], pairs: &[Pair], labels: &[String]) -> Vec<Place> {
+    let n = tracks.len();
+    let rank = |t: usize| labels.iter().position(|l| *l == tracks[t].label).unwrap_or(usize::MAX);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&x, &y| rank(x).cmp(&rank(y)).then(tracks[x].start_secs.cmp(&tracks[y].start_secs)));
+    let mut place: Vec<Option<Place>> = vec![None; n];
+    for seed in order {
+        if place[seed].is_some() {
+            continue;
+        }
+        place[seed] = Some(Place { p: tracks[seed].start_secs as f64, s: 1.0 });
+        let mut queue = VecDeque::from([seed]);
+        while let Some(x) = queue.pop_front() {
+            let px = place[x].expect("placed");
+            for pr in pairs.iter().filter(|p| p.ok && (p.a == x || p.b == x)) {
+                let other = if pr.a == x { pr.b } else { pr.a };
+                if place[other].is_some() {
+                    continue;
+                }
+                // B time = A time · (1 − drift) − offset
+                place[other] = Some(if pr.a == x {
+                    let s = px.s * (1.0 - pr.drift);
+                    Place { p: px.p + pr.offset / s, s }
+                } else {
+                    Place { p: px.p - pr.offset / px.s, s: px.s / (1.0 - pr.drift) }
+                });
+                queue.push_back(other);
+            }
+        }
+    }
+    place.into_iter().map(|p| p.unwrap_or(Place { p: 0.0, s: 1.0 })).collect()
+}
+
+/// Clips of the analysis proposal, taken from the drafted output files.
+fn clips_from_drafts(tracks: &[Track], pairs: &[Pair], drafts: &[Draft]) -> Vec<Clip> {
+    let mut clips = Vec::new();
+    for d in drafts {
+        let r = d.reference;
+        let mode = if d.kind == "stereo" { ClipMode::Stereo } else { ClipMode::Mono };
+        clips.push(Clip { track: r, t0: d.t0, t1: d.t1, mode, deleted: false });
+        for sp in &d.spans {
+            let p = &pairs[sp.pair];
+            let (a, b) = (map_time(p, r, sp.t0), map_time(p, r, sp.t1));
+            clips.push(Clip { track: sp.other, t0: a.min(b), t1: a.max(b), mode: ClipMode::Stereo, deleted: false });
+        }
+    }
+    normalize_clips(tracks, clips)
+}
+
+/// Clamps clips to their recordings, sorts them and removes overlaps within a track.
+pub fn normalize_clips(tracks: &[Track], clips: Vec<Clip>) -> Vec<Clip> {
+    let mut clips: Vec<Clip> = clips.into_iter().filter(|c| c.track < tracks.len() && c.t0.is_finite() && c.t1.is_finite()).collect();
+    for c in clips.iter_mut() {
+        let d = tracks[c.track].duration;
+        let (a, b) = (c.t0.clamp(0.0, d), c.t1.clamp(0.0, d));
+        c.t0 = a.min(b);
+        c.t1 = a.max(b);
+    }
+    clips.sort_by(|a, b| a.track.cmp(&b.track).then(a.t0.total_cmp(&b.t0)));
+    let mut out: Vec<Clip> = Vec::new();
+    for mut c in clips {
+        if let Some(prev) = out.last() {
+            if prev.track == c.track && c.t0 < prev.t1 {
+                c.t0 = prev.t1;
+            }
+        }
+        if c.t1 - c.t0 >= MIN_CLIP_S {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn same_clips(a: &[Clip], b: &[Clip]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.track == y.track && x.mode == y.mode && x.deleted == y.deleted && (x.t0 - y.t0).abs() < 1e-3 && (x.t1 - y.t1).abs() < 1e-3
+        })
+}
+
+fn extent(tracks: &[Track], places: &[Place], i: usize) -> (f64, f64) {
+    (places[i].to_timeline(0.0), places[i].to_timeline(tracks[i].duration))
+}
+
+fn day_clock(t: f64) -> (String, f64) {
+    let s = t.floor() as i64;
+    let c = clock(s);
+    (c.day, c.of_day + (t - s as f64))
+}
+
+fn evidence(pairs: &[Pair], places: &[Place], t0: f64, t1: f64) -> (Option<f64>, Option<f64>) {
+    let (mut hits, mut active, mut msc_sum, mut msc_n) = (0usize, 0usize, 0.0f64, 0usize);
+    for p in pairs.iter().filter(|p| p.ok) {
+        for f in &p.frames {
+            let t = places[p.a].to_timeline(f.t + FRAME_MS as f64 / ENV_RATE / 2.0);
+            if !f.active || t < t0 || t >= t1 {
+                continue;
+            }
+            active += 1;
+            hits += f.hit as usize;
+            if let Some(m) = f.msc {
+                msc_sum += m as f64;
+                msc_n += 1;
+            }
+        }
+    }
+    ((active > 0).then(|| hits as f64 / active as f64), (msc_n > 0).then(|| msc_sum / msc_n as f64))
+}
+
+fn covered(sources: &[Source], t0: f64, t1: f64) -> f64 {
+    let mut iv: Vec<(f64, f64)> = sources.iter().map(|s| (s.t0.max(t0), s.t1.min(t1))).filter(|(a, b)| b > a).collect();
+    iv.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut sum, mut end) = (0.0, f64::NEG_INFINITY);
+    for (a, b) in iv {
+        let a = a.max(end);
+        if b > a {
+            sum += b - a;
+            end = b;
+        }
+    }
+    sum
+}
+
+/// Output files from the clips. Mono clips become mono files. The first two
+/// recorders' stereo clips form stereo files (first recorder left): a file ends
+/// where no stereo clip continues, i.e. at a gap or where every running stereo
+/// clip has an edge at the same instant — a recorder that drops out keeps the
+/// file going, splitting both tracks at one instant splits the file. A single
+/// stereo track leaves the other channel silent. Further recorders are mono.
+pub fn items_from_clips(tracks: &[Track], pairs: &[Pair], places: &[Place], labels: &[String], clips: &[Clip]) -> Vec<Item> {
+    let lane = |t: usize| labels.iter().position(|l| *l == tracks[t].label).unwrap_or(usize::MAX);
+    let stereo_possible = labels.len() >= 2;
+    let is_stereo = |c: &Clip| c.mode == ClipMode::Stereo && stereo_possible && lane(c.track) < 2;
+    let mut items = Vec::new();
+
+    let mut ivs: Vec<(usize, Source)> = clips
+        .iter()
+        .filter(|c| !c.deleted && is_stereo(c))
+        .map(|c| (lane(c.track), Source { track: c.track, t0: places[c.track].to_timeline(c.t0), t1: places[c.track].to_timeline(c.t1) }))
+        .collect();
+    ivs.sort_by(|a, b| a.1.t0.total_cmp(&b.1.t0));
+    let mut groups: Vec<Vec<(usize, Source)>> = Vec::new();
+    let mut end = f64::NEG_INFINITY;
+    for iv in ivs {
+        if groups.is_empty() || iv.1.t0 >= end - SAME_INSTANT_S {
+            end = iv.1.t1;
+            groups.push(Vec::new());
+        } else {
+            end = end.max(iv.1.t1);
+        }
+        groups.last_mut().expect("group").push(iv);
+    }
+    for g in groups {
+        let t0 = g.iter().map(|x| x.1.t0).fold(f64::INFINITY, f64::min);
+        let t1 = g.iter().map(|x| x.1.t1).fold(f64::NEG_INFINITY, f64::max);
+        let mut sides: [Vec<Source>; 2] = [Vec::new(), Vec::new()];
+        for (l, src) in g {
+            sides[l].push(src);
+        }
+        let rep = |l: usize| sides[l].first().map(|s| s.track).or_else(|| tracks.iter().position(|t| t.label == labels[l]));
+        let (left, right) = (rep(0).unwrap_or(0), rep(1));
+        let rate = tracks[sides[0].first().or(sides[1].first()).map_or(0, |s| s.track)].info.sample_rate;
+        let mut silent = Vec::new();
+        for l in 0..2 {
+            let missing = (t1 - t0) - covered(&sides[l], t0, t1);
+            if missing > 0.5 {
+                silent.push(Silence { label: labels[l].clone(), seconds: missing });
+            }
+        }
+        let start_secs = t0.round() as i64;
+        let dur = (t1 - t0).round() as i64;
+        let (c0, c1) = (clock(start_secs), clock(start_secs + dur));
+        let (day, clock0) = day_clock(t0);
+        let (hit_share, msc) = evidence(pairs, places, t0, t1);
+        let frames = ((t1 - t0) * rate as f64).round() as u64;
+        let [left_sources, right_sources] = sides;
+        items.push(Item {
+            id: 0,
+            kind: "stereo",
+            name: format!("{}_stereo_L-{}_R-{}.wav", stamp(start_secs, dur), labels[0], labels[1]),
+            day: if c0.day == day { c0.day } else { day },
+            start: c0.hms,
+            end: c1.hms,
+            clock0,
+            duration: t1 - t0,
+            left,
+            right,
+            t0,
+            t1,
+            left_sources,
+            right_sources,
+            dropout: silent.iter().map(|s| s.seconds).sum(),
+            silent,
+            hit_share,
+            msc,
+            bytes: wav::output_size(16, frames * 8),
+            reason: "gemeinsam",
+            start_secs,
+            rate,
+        });
+    }
+
+    for c in clips.iter().filter(|c| !c.deleted && !is_stereo(c)) {
+        let t = &tracks[c.track];
+        let (a, b) = (places[c.track].to_timeline(c.t0), places[c.track].to_timeline(c.t1));
+        let others = (0..tracks.len()).any(|o| {
+            let (x0, x1) = extent(tracks, places, o);
+            tracks[o].label != t.label && x0 < b - 0.5 && x1 > a + 0.5
+        });
+        let (f0, f1) = mono_frames(t, c.t0, c.t1);
+        let start_secs = t.start_secs + c.t0.round() as i64;
+        let dur = (c.t1 - c.t0).round() as i64;
+        let (c0, c1) = (clock(start_secs), clock(start_secs + dur));
+        let (_, clock0) = day_clock(a);
+        items.push(Item {
+            id: 0,
+            kind: "mono",
+            name: format!("{}_mono_{}.wav", stamp(start_secs, dur), t.label),
+            day: c0.day,
+            start: c0.hms,
+            end: c1.hms,
+            clock0,
+            duration: c.t1 - c.t0,
+            left: c.track,
+            right: None,
+            t0: c.t0,
+            t1: c.t1,
+            left_sources: Vec::new(),
+            right_sources: Vec::new(),
+            dropout: 0.0,
+            silent: Vec::new(),
+            hit_share: None,
+            msc: None,
+            bytes: mono_bytes(t, f0, f1),
+            reason: if others { "getrennt" } else { "allein" },
+            start_secs,
+            rate: t.info.sample_rate,
+        });
+    }
+
+    items.sort_by(|x, y| x.start_secs.cmp(&y.start_secs).then_with(|| x.kind.cmp(y.kind)).then_with(|| x.name.cmp(&y.name)));
+    let mut used: HashSet<String> = HashSet::new();
+    for (i, it) in items.iter_mut().enumerate() {
+        it.id = i;
+        if !used.insert(it.name.clone()) {
+            let stem = it.name.trim_end_matches(".wav").to_string();
+            let mut n = 2;
+            while !used.insert(format!("{stem}_{n}.wav")) {
+                n += 1;
+            }
+            it.name = format!("{stem}_{n}.wav");
+        }
+    }
+    items
+}
+
+#[derive(Serialize, Deserialize)]
+struct EditFile {
+    app: String,
+    version: u32,
+    tracks: Vec<EditTrack>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EditTrack {
+    name: String,
+    start_secs: i64,
+    frames: u64,
+    clips: Vec<EditClip>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EditClip {
+    t0: f64,
+    t1: f64,
+    mode: ClipMode,
+    #[serde(default)]
+    deleted: bool,
+}
+
+fn load_edits(tracks: &[Track], root: &Path) -> Option<HashMap<usize, Vec<Clip>>> {
+    let text = fs::read_to_string(root.join(EDIT_FILE)).ok()?;
+    let file: EditFile = serde_json::from_str(&text).ok()?;
+    let mut out = HashMap::new();
+    for et in file.tracks {
+        if let Some(t) = tracks.iter().find(|t| t.name == et.name && t.start_secs == et.start_secs && t.frames == et.frames) {
+            let clips = et.clips.into_iter().map(|c| Clip { track: t.id, t0: c.t0, t1: c.t1, mode: c.mode, deleted: c.deleted }).collect();
+            out.insert(t.id, clips);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn merge_edits(tracks: &[Track], analysis: &[Clip], edits: HashMap<usize, Vec<Clip>>) -> Vec<Clip> {
+    let mut clips: Vec<Clip> = analysis.iter().filter(|c| !edits.contains_key(&c.track)).cloned().collect();
+    for (_, v) in edits {
+        clips.extend(v);
+    }
+    normalize_clips(tracks, clips)
+}
+
+fn save_edits(plan: &SyncPlan) -> Result<(), String> {
+    let path = Path::new(&plan.roots[0]).join(EDIT_FILE);
+    if !plan.edited {
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    let file = EditFile {
+        app: "PrepareAudio".into(),
+        version: 1,
+        tracks: plan
+            .tracks
+            .iter()
+            .map(|t| EditTrack {
+                name: t.name.clone(),
+                start_secs: t.start_secs,
+                frames: t.frames,
+                clips: plan.clips.iter().filter(|c| c.track == t.id).map(|c| EditClip { t0: c.t0, t1: c.t1, mode: c.mode, deleted: c.deleted }).collect(),
+            })
+            .collect(),
+    };
+    let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+    let tmp = path.with_file_name(format!("{EDIT_FILE}.tmp"));
+    fs::write(&tmp, text).map_err(|e| tf(Msg::SaveEditFailed, &[("e", &e)]))?;
+    fs::rename(&tmp, &path).map_err(|e| tf(Msg::SaveEditFailed, &[("e", &e)]))
+}
+
+/// Takes the edited clips, recomputes the output files and saves the edit (or
+/// removes the edit file when the clips equal the analysis proposal again).
+pub fn apply_clips(plan: &mut SyncPlan, clips: Vec<Clip>) -> Result<(), String> {
+    plan.clips = normalize_clips(&plan.tracks, clips);
+    plan.items = items_from_clips(&plan.tracks, &plan.pairs, &plan.places, &plan.labels, &plan.clips);
+    plan.edited = !same_clips(&plan.clips, &plan.analysis_clips);
+    save_edits(plan)
+}
+
+pub fn reset_clips(plan: &mut SyncPlan) -> Result<(), String> {
+    let proposal = plan.analysis_clips.clone();
+    apply_clips(plan, proposal)
+}
+
+fn peak_pyramid(ms: &[u8]) -> Peaks {
+    let mut levels = vec![ms.to_vec()];
+    for _ in 0..3 {
+        let next: Vec<u8> = levels.last().expect("level").chunks(10).map(|c| c.iter().copied().max().unwrap_or(0)).collect();
+        levels.push(next);
+    }
+    Peaks { levels }
+}
+
+/// Peaks of `track` between two track seconds, one value per bucket.
+pub fn peaks(plan: &SyncPlan, track: usize, t0: f64, t1: f64, buckets: usize) -> Vec<u8> {
+    let Some(pk) = plan.peaks.get(track) else { return Vec::new() };
+    if pk.levels.is_empty() || !(t1 > t0) {
+        return vec![0; buckets.min(20_000)];
+    }
+    let buckets = buckets.clamp(1, 20_000);
+    let per_bucket_ms = (t1 - t0) * 1000.0 / buckets as f64;
+    let (mut level, mut bin_ms) = (0usize, 1.0f64);
+    while level + 1 < pk.levels.len() && bin_ms * 10.0 <= per_bucket_ms {
+        level += 1;
+        bin_ms *= 10.0;
+    }
+    let data = &pk.levels[level];
+    (0..buckets)
+        .map(|i| {
+            let a = ((t0 * 1000.0 + i as f64 * per_bucket_ms) / bin_ms).floor().max(0.0) as usize;
+            let b = (((t0 * 1000.0 + (i + 1) as f64 * per_bucket_ms) / bin_ms).ceil().max(0.0) as usize).min(data.len());
+            if a >= b { 0 } else { data[a..b].iter().copied().max().unwrap_or(0) }
+        })
+        .collect()
+}
+
+/// Gain for previews: loud passages (90th percentile of 400-ms blocks) to about −20 dB.
+fn preview_gain(loud: &[f32]) -> f32 {
+    let mut blocks: Vec<f64> = loud.chunks_exact(400).map(|c| c.iter().map(|&x| x as f64).sum::<f64>() / 400.0).filter(|&e| e > 0.0).collect();
+    if blocks.is_empty() {
+        return 20.0;
+    }
+    let k = ((blocks.len() as f64 * 0.9) as usize).min(blocks.len() - 1);
+    blocks.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
+    (PREVIEW_TARGET_DB - 10.0 * blocks[k].log10()).clamp(0.0, 40.0) as f32
+}
+
+/// Fills `dst` with `track` for frames `from..to` of the timeline sampled at `sr`
+/// (frame k is timeline second k / sr). On the raster (clock rate 1, start on a
+/// whole sample, same rate) the samples are copied bit-exactly, otherwise cubic.
+pub(crate) fn render_source(tracks: &[Track], places: &[Place], track: usize, sr: f64, from: i64, to: i64, dst: &mut [f32]) -> io::Result<()> {
+    let t = &tracks[track];
+    let pl = places[track];
+    let tsr = t.info.sample_rate as f64;
+    let kp = pl.p * sr;
+    let cnt = (to - from).max(0) as usize;
+    if cnt == 0 {
+        return Ok(());
+    }
+    if tsr == sr && pl.s == 1.0 && (kp - kp.round()).abs() < 1e-6 {
+        let v = read_mono(t, from - kp.round() as i64, cnt)?;
+        dst[..cnt].copy_from_slice(&v);
+        return Ok(());
+    }
+    let pos = |k: i64| ((k as f64 - kp) / sr) * pl.s * tsr;
+    let first = pos(from).floor() as i64 - 1;
+    let last = pos(to - 1).floor() as i64 + 2;
+    let src = read_mono(t, first, (last - first + 1) as usize)?;
+    for (j, d) in dst[..cnt].iter_mut().enumerate() {
+        let x = pos(from + j as i64);
+        let i = x.floor();
+        let idx = (i as i64 - first) as usize;
+        *d = catmull(src[idx - 1], src[idx], src[idx + 1], src[idx + 2], (x - i) as f32);
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ writing
 
 enum WErr {
@@ -1721,6 +2445,9 @@ fn catmull(p0: f32, p1: f32, p2: f32, p3: f32, x: f32) -> f32 {
 fn write_mono<W: Write>(t: &Track, it: &Item, out: &mut W, cancel: &AtomicBool, report: &mut dyn FnMut(u64)) -> Result<(), WErr> {
     let ba = t.info.block_align as u64;
     let (f0, f1) = mono_frames(t, it.t0, it.t1);
+    if t.info.channels > 1 {
+        return write_mono_mix(t, f0, f1, out, cancel, report);
+    }
     let data = (f1 - f0) * ba;
     wav::write_header(out, &t.info.fmt, data, f1 - f0, wav::RIFF_LIMIT)?;
     let mut buf = vec![0u8; 4 << 20];
@@ -1753,23 +2480,36 @@ fn write_mono<W: Write>(t: &Track, it: &Item, out: &mut W, cancel: &AtomicBool, 
     Ok(())
 }
 
-/// The reference track runs through bit-exactly on its side (normally the left
-/// recorder). The other channel follows each span via offset and drift of its
-/// pair (integer shift when the drift stays below half a sample, otherwise
-/// cubic interpolation); outside the spans it is silent.
+/// Mono mix (mean of the channels, as in `read_mono`) of a multi-channel track as 32-bit float.
+fn write_mono_mix<W: Write>(t: &Track, f0: u64, f1: u64, out: &mut W, cancel: &AtomicBool, report: &mut dyn FnMut(u64)) -> Result<(), WErr> {
+    let n = f1 - f0;
+    wav::write_header(out, &decode::float_fmt(1, t.info.sample_rate), n * 4, n, wav::RIFF_LIMIT)?;
+    let block = 1u64 << 18;
+    let mut bytes = Vec::with_capacity(block as usize * 4);
+    let mut m = 0u64;
+    while m < n {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(WErr::Cancelled);
+        }
+        let len = (n - m).min(block);
+        let v = read_mono(t, (f0 + m) as i64, len as usize)?;
+        bytes.clear();
+        bytes.extend(v.iter().flat_map(|x| x.to_le_bytes()));
+        out.write_all(&bytes)?;
+        m += len;
+        report(m * 4);
+    }
+    Ok(())
+}
+
+/// Output raster = the day's timeline at the item's sample rate; each channel is
+/// the list of its sources (see `render_source`), silence elsewhere.
 fn write_stereo<W: Write>(plan: &SyncPlan, it: &Item, out: &mut W, cancel: &AtomicBool, report: &mut dyn FnMut(u64)) -> Result<(), WErr> {
-    let r = &plan.tracks[it.reference];
-    let ref_left = it.reference == it.left || r.label == plan.tracks[it.left].label;
-    let sr = r.info.sample_rate as f64;
-    let f0 = (it.t0 * sr).round() as i64;
+    let sr = it.rate as f64;
+    let k0 = (it.t0 * sr).round() as i64;
     let n = ((it.t1 - it.t0) * sr).round() as u64;
-    wav::write_header(out, &float_stereo_fmt(r.info.sample_rate), n * 8, n, wav::RIFF_LIMIT)?;
-    let lanes: Vec<(&Pair, &Track, i64, i64)> = it
-        .spans
-        .iter()
-        .map(|s| (&plan.pairs[s.pair], &plan.tracks[s.other], (s.t0 * sr).round() as i64, (s.t1 * sr).round() as i64))
-        .collect();
-    let block = r.info.sample_rate as u64;
+    wav::write_header(out, &float_stereo_fmt(it.rate), n * 8, n, wav::RIFF_LIMIT)?;
+    let block = it.rate as u64;
     let mut bytes = Vec::with_capacity(block as usize * 8);
     let mut m = 0u64;
     while m < n {
@@ -1777,38 +2517,21 @@ fn write_stereo<W: Write>(plan: &SyncPlan, it: &Item, out: &mut W, cancel: &Atom
             return Err(WErr::Cancelled);
         }
         let len = (n - m).min(block) as usize;
-        let k0 = f0 + m as i64;
-        let main = read_mono(r, k0, len)?;
-        let mut second = vec![0f32; len];
-        for &(p, o, s0, s1) in &lanes {
-            let (from, to) = (k0.max(s0), (k0 + len as i64).min(s1));
-            if to <= from {
-                continue;
-            }
-            let (cnt, dst) = ((to - from) as usize, (from - k0) as usize);
-            let osr = o.info.sample_rate as f64;
-            let pos = |k: i64| map_time(p, r.id, k as f64 / sr) * osr;
-            let exact = r.info.sample_rate == o.info.sample_rate && (pos(s1) - pos(s0) - (s1 - s0) as f64).abs() < 0.5;
-            if exact {
-                let shift = pos(s0).round() as i64 - s0;
-                second[dst..dst + cnt].copy_from_slice(&read_mono(o, from + shift, cnt)?);
-            } else {
-                let first = pos(from).floor() as i64 - 1;
-                let last = pos(to - 1).floor() as i64 + 2;
-                let src = read_mono(o, first, (last - first + 1) as usize)?;
-                for j in 0..cnt {
-                    let x = pos(from + j as i64);
-                    let i = x.floor();
-                    let idx = (i as i64 - first) as usize;
-                    second[dst + j] = catmull(src[idx - 1], src[idx], src[idx + 1], src[idx + 2], (x - i) as f32);
+        let ks = k0 + m as i64;
+        let mut chans = [vec![0f32; len], vec![0f32; len]];
+        for (ci, sources) in [&it.left_sources, &it.right_sources].into_iter().enumerate() {
+            for src in sources {
+                let (s0, s1) = ((src.t0 * sr).round() as i64, (src.t1 * sr).round() as i64);
+                let (from, to) = (ks.max(s0), (ks + len as i64).min(s1));
+                if to > from {
+                    render_source(&plan.tracks, &plan.places, src.track, sr, from, to, &mut chans[ci][(from - ks) as usize..(to - ks) as usize])?;
                 }
             }
         }
         bytes.clear();
         for j in 0..len {
-            let (l, rr) = if ref_left { (main[j], second[j]) } else { (second[j], main[j]) };
-            bytes.extend_from_slice(&l.to_le_bytes());
-            bytes.extend_from_slice(&rr.to_le_bytes());
+            bytes.extend_from_slice(&chans[0][j].to_le_bytes());
+            bytes.extend_from_slice(&chans[1][j].to_le_bytes());
         }
         out.write_all(&bytes)?;
         m += len as u64;
@@ -1822,7 +2545,7 @@ fn write_item(plan: &SyncPlan, it: &Item, target: &Path, cancel: &AtomicBool, re
     let partial = target.with_file_name(format!("{file_name}.part"));
     let result = write_item_into(plan, it, &partial, cancel, report).and_then(|()| {
         if target.exists() {
-            return Err(WErr::Io(format!("{} existiert inzwischen bereits", target.display())));
+            return Err(WErr::Io(tf(Msg::ExistsMeanwhile, &[("path", &target.display())])));
         }
         fs::rename(&partial, target).map_err(WErr::from)
     });
@@ -1844,7 +2567,7 @@ fn write_item_into(plan: &SyncPlan, it: &Item, path: &Path, cancel: &AtomicBool,
     drop(file);
     let info = wav::read_info(path)?;
     if info.repaired || info.file_size != it.bytes {
-        return Err(WErr::Io("Kontrolle der geschriebenen Datei fehlgeschlagen".into()));
+        return Err(WErr::Io(t(Msg::VerifyFailed).into()));
     }
     Ok(())
 }
@@ -1870,7 +2593,7 @@ fn resolve(out_dir: &Path, it: &Item, reserved: &mut HashSet<PathBuf>) -> Option
 }
 
 pub fn write<F: FnMut(&Progress)>(plan: &SyncPlan, ids: &[usize], out_dir: &Path, cancel: &AtomicBool, mut progress: F) -> Result<Summary, String> {
-    fs::create_dir_all(out_dir).map_err(|e| format!("Zielordner {} kann nicht angelegt werden: {e}", out_dir.display()))?;
+    fs::create_dir_all(out_dir).map_err(|e| tf(Msg::CannotCreateDir, &[("path", &out_dir.display()), ("e", &e)]))?;
     let mut outcomes = Vec::new();
     let mut todo: Vec<(&Item, PathBuf)> = Vec::new();
     let mut reserved = HashSet::new();
@@ -1878,13 +2601,13 @@ pub fn write<F: FnMut(&Progress)>(plan: &SyncPlan, ids: &[usize], out_dir: &Path
         match resolve(out_dir, it, &mut reserved) {
             Some((p, true)) => outcomes.push(Outcome { id: it.id, status: Status::Existing, path: Some(p.display().to_string()), message: None }),
             Some((p, false)) => todo.push((it, p)),
-            None => outcomes.push(Outcome { id: it.id, status: Status::Failed, path: None, message: Some("kein freier Dateiname".into()) }),
+            None => outcomes.push(Outcome { id: it.id, status: Status::Failed, path: None, message: Some(t(Msg::NoFreeName).into()) }),
         }
     }
     let total: u64 = todo.iter().map(|(i, _)| i.bytes).sum();
     if let Some(free) = available_bytes(out_dir) {
         if total > 0 && free < total + (64 << 20) {
-            return Err(format!("Zu wenig Speicherplatz im Zielordner: benötigt {}, frei {}.", human_bytes(total), human_bytes(free)));
+            return Err(low_space(total, free));
         }
     }
     let count = todo.len();
@@ -1898,11 +2621,11 @@ pub fn write<F: FnMut(&Progress)>(plan: &SyncPlan, ids: &[usize], out_dir: &Path
         let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let base = done;
         let result = {
-            let mut report = |d: u64| progress(&Progress { index, count, id: it.id, name: name.clone(), done: base + d, total, milestone: false });
+            let mut report = |d: u64| progress(&Progress { index, count, id: it.id, name: name.clone(), done: base + d, total, milestone: false, active: Vec::new() });
             report(0);
             write_item(plan, it, target, cancel, &mut report)
         };
-        progress(&Progress { index, count, id: it.id, name: name.clone(), done: base + it.bytes, total, milestone: true });
+        progress(&Progress { index, count, id: it.id, name: name.clone(), done: base + it.bytes, total, milestone: true, active: Vec::new() });
         done += it.bytes;
         outcomes.push(match result {
             Ok(()) => Outcome { id: it.id, status: Status::Written, path: Some(target.display().to_string()), message: None },
@@ -1984,9 +2707,32 @@ mod tests {
         assert!(msc(&s, &q, sr).unwrap() < 0.05);
     }
 
+    fn lr_of(path: &Path) -> Vec<(f32, f32)> {
+        let info = wav::read_info(path).unwrap();
+        let raw = wav::read_at(path, info.data_offset, info.data_len).unwrap();
+        raw.chunks_exact(8).map(|c| (f32::from_le_bytes(c[0..4].try_into().unwrap()), f32::from_le_bytes(c[4..8].try_into().unwrap()))).collect()
+    }
+
+    fn out_path(sum: &Summary, id: usize) -> PathBuf {
+        PathBuf::from(sum.outcomes.iter().find(|o| o.id == id).unwrap().path.clone().unwrap())
+    }
+
+    /// Integer lag (−8…8 samples) at which a channel matches `src` best over one second at 8 kHz.
+    fn best_lag(lr: &[(f32, f32)], left: bool, k0: usize, src: &dyn Fn(usize) -> f32) -> i64 {
+        (-8i64..=8)
+            .max_by(|&x, &y| {
+                let score = |d: i64| {
+                    (k0..k0 + 8000).map(|k| (if left { lr[k].0 } else { lr[k].1 }) as f64 * src((k as i64 + d) as usize) as f64).sum::<f64>()
+                };
+                score(x).total_cmp(&score(y))
+            })
+            .unwrap()
+    }
+
     /// Recorder 5 runs through; recorder 4 is off between 300 s and 500 s of
     /// 5's clock. Same situation throughout, so one stereo file results with
-    /// silence on the left during the dropout, and the right channel is 5 bit-exactly.
+    /// silence on the left during the dropout. Recorder 4's first track anchors
+    /// the timeline and is copied bit-exactly.
     #[test]
     fn dropout_between_stereo_stretches_stays_one_stereo_file() {
         let dir = tempdir("dropout");
@@ -1994,7 +2740,6 @@ mod tests {
         let s = talk(11, sr, 900 * sr as usize);
         let mut floor = Lcg(21);
         let five: Vec<f32> = (0..900 * sr as usize).map(|k| 0.5 * s[k] + 0.002 * (floor.next() as f32 - 0.5)).collect();
-        // 4a starts 2 s before 5 (its first 2 s are its own noise), 4b starts at 5's 500 s.
         let lead = talk(12, sr, 2 * sr as usize);
         let a4: Vec<f32> = (0..300 * sr as usize)
             .map(|g| if g < 2 * sr as usize { lead[g] } else { s[g - 2 * sr as usize] } + 0.002 * (floor.next() as f32 - 0.5))
@@ -2006,39 +2751,27 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let plan = analyze(&[dir.join("tracks")], &cancel, &mut |_| {}).unwrap();
-        assert_eq!(plan.pairs.iter().filter(|p| p.ok).count(), 2, "{:?}", plan.pairs.iter().map(|p| (p.ok, p.offset)).collect::<Vec<_>>());
+        assert_eq!(plan.pairs.iter().filter(|p| p.ok).count(), 2);
         assert_eq!(plan.items.len(), 1, "{:#?}", plan.items.iter().map(|i| (i.kind, i.reason, i.t0, i.t1)).collect::<Vec<_>>());
         let it = &plan.items[0];
-        assert_eq!((it.kind, it.spans.len()), ("stereo", 2));
-        assert_eq!(plan.tracks[it.reference].label, "5");
-        assert!((it.t0 + 2.0).abs() < 0.01 && (it.t1 - 900.0).abs() < 0.01, "{} {}", it.t0, it.t1);
-        assert!((it.dropout - 202.0).abs() < 1.0, "dropout {}", it.dropout);
+        let p4 = plan.places[0];
+        assert_eq!((it.kind, it.left_sources.len(), it.right_sources.len()), ("stereo", 2, 1));
+        assert!((it.t0 - p4.p).abs() < 0.01 && (it.t1 - p4.p - 902.0).abs() < 0.05, "{} {}", it.t0 - p4.p, it.t1 - p4.p);
+        let silent = |l: &str| it.silent.iter().find(|x| x.label == l).map_or(0.0, |x| x.seconds);
+        assert!((silent("4") - 202.0).abs() < 1.0 && (silent("5") - 2.0).abs() < 0.5, "{:?}", it.silent);
         assert!(it.name.ends_with("_stereo_L-4_R-5.wav"), "{}", it.name);
 
         let sum = write(&plan, &[it.id], &dir.join("sync"), &cancel, |_| {}).unwrap();
-        let path = PathBuf::from(sum.outcomes[0].path.clone().unwrap());
-        let info = wav::read_info(&path).unwrap();
-        let raw = wav::read_at(&path, info.data_offset, info.data_len).unwrap();
-        let lr: Vec<(f32, f32)> =
-            raw.chunks_exact(8).map(|c| (f32::from_le_bytes(c[0..4].try_into().unwrap()), f32::from_le_bytes(c[4..8].try_into().unwrap()))).collect();
-        let lead_frames = 2 * sr as usize;
-        assert_eq!(lr.len(), 902 * sr as usize);
-        for k in [0usize, 5_000, 2_000_000, 3_000_000, 7_100_000] {
-            assert_eq!(lr[lead_frames + k].1, five[k], "right channel is recorder 5 bit-exactly");
+        let lr = lr_of(&out_path(&sum, it.id));
+        let lead = 2 * sr as usize;
+        assert!((lr.len() as i64 - 902 * sr as i64).abs() <= 2, "{}", lr.len());
+        for k in [0usize, 5_000, 1_000_000, 2_000_000] {
+            assert_eq!(lr[k].0, a4[k], "left is recorder 4's first track bit-exactly");
         }
-        assert_eq!(lr[lead_frames - 10].1, 0.0);
-        let gap = (lead_frames + 310 * sr as usize)..(lead_frames + 490 * sr as usize);
+        let gap = (lead + 310 * sr as usize)..(lead + 490 * sr as usize);
         assert!(lr[gap].iter().all(|v| v.0 == 0.0), "left channel silent while recorder 4 was off");
-        let aligned = |k0: usize, src: &dyn Fn(usize) -> f32| {
-            (-8i64..=8)
-                .max_by(|&x, &y| {
-                    let score = |d: i64| (k0..k0 + 8000).map(|k| lr[k].0 as f64 * src((k as i64 + d) as usize) as f64).sum::<f64>();
-                    score(x).total_cmp(&score(y))
-                })
-                .unwrap()
-        };
-        assert_eq!(aligned(lead_frames + 100 * sr as usize, &|k| a4[k]), 0, "left follows 4a");
-        assert_eq!(aligned(lead_frames + 600 * sr as usize, &|k| b4[k - lead_frames - 500 * sr as usize]), 0, "left follows 4b");
+        assert_eq!(best_lag(&lr, false, lead + 100 * sr as usize, &|k| five[k - lead]), 0, "right follows 5");
+        assert_eq!(best_lag(&lr, true, lead + 600 * sr as usize, &|k| b4[k - lead - 500 * sr as usize]), 0, "left follows 4b");
     }
 
     /// A merged track for recorder 4 plus raw DJI parts for 4 and 5: the track
@@ -2060,11 +2793,30 @@ mod tests {
         assert!(loaded.ignored.is_empty(), "{:?}", loaded.ignored);
     }
 
-    /// Recorder 4 runs 150 s alone before 5 starts, 5 runs 100 s alone after 4
-    /// stops. Nothing parallel differs, so it is one stereo file with silence.
+    /// Raw chunks of any recorder: a chain without a name pattern (bext TimeReference)
+    /// becomes one track, a single WAV a track of its own; nothing is ignored.
     #[test]
-    fn long_solo_lead_and_tail_stay_in_the_stereo_file() {
-        let dir = tempdir("solo");
+    fn raw_chunks_with_any_names_become_tracks() {
+        let dir = tempdir("anyraw");
+        let sr = 8000u32;
+        let s = talk(51, sr, 80 * sr as usize);
+        let tr0 = 10 * 3600 * sr as u64;
+        let half = 40 * sr as usize;
+        write_float_bwf(&dir.join("rec/take-a.wav"), sr, &s[..half], "2026-01-01", "10:00:00", tr0);
+        write_float_bwf(&dir.join("rec/take-b.wav"), sr, &s[half..], "2026-01-01", "10:00:40", tr0 + half as u64);
+        write_float_wav(&dir.join("other/interview 260101_110000.wav"), sr, &talk(52, sr, 30 * sr as usize));
+        let loaded = load(&[dir.clone()]).unwrap();
+        assert_eq!(loaded.source, "chunks");
+        assert!(loaded.ignored.is_empty(), "{:?}", loaded.ignored);
+        let mut got: Vec<(String, usize, i64)> = loaded.tracks.iter().map(|t| (t.label.clone(), t.parts, t.start_secs)).collect();
+        got.sort();
+        let day = days_from_civil(2026, 1, 1) * 86400;
+        assert_eq!(got, [("other".to_string(), 1, day + 11 * 3600), ("rec".to_string(), 2, day + 10 * 3600)]);
+    }
+
+    /// Recorder 4 runs 150 s alone, then both record the same talk, then 5 runs 100 s alone.
+    fn solo_setup(tag: &str) -> (PathBuf, SyncPlan, Vec<f32>, Vec<f32>, u32) {
+        let dir = tempdir(tag);
         let sr = 8000u32;
         let n = |secs: usize| secs * sr as usize;
         let s = talk(31, sr, n(700));
@@ -2073,30 +2825,115 @@ mod tests {
         let five: Vec<f32> = (0..n(550)).map(|k| 0.5 * s[k + n(150)] + 0.002 * (floor.next() as f32 - 0.5)).collect();
         write_float_wav(&dir.join("tracks/260101_S100000-E101000_D001000_4.wav"), sr, &four);
         write_float_wav(&dir.join("tracks/260101_S100230-E101140_D000910_5.wav"), sr, &five);
-        let cancel = AtomicBool::new(false);
-        let plan = analyze(&[dir.join("tracks")], &cancel, &mut |_| {}).unwrap();
+        let plan = analyze(&[dir.join("tracks")], &AtomicBool::new(false), &mut |_| {}).unwrap();
+        (dir, plan, four, five, sr)
+    }
+
+    #[test]
+    fn long_solo_lead_and_tail_stay_in_the_stereo_file() {
+        let (dir, plan, four, _five, sr) = solo_setup("solo");
+        let n = |secs: usize| secs * sr as usize;
         assert!(plan.pairs[0].ok);
         assert_eq!(plan.items.len(), 1, "{:#?}", plan.items.iter().map(|i| (i.kind, i.reason, i.t0, i.t1)).collect::<Vec<_>>());
         let it = &plan.items[0];
-        assert_eq!(it.kind, "stereo");
-        assert!(it.t0.abs() < 0.01 && (it.t1 - 700.0).abs() < 0.05, "{} {}", it.t0, it.t1);
+        let p4 = plan.places[0];
+        assert_eq!((it.kind, p4.s, plan.tracks[0].label.as_str()), ("stereo", 1.0, "4"));
+        assert!((it.t0 - p4.p).abs() < 0.01 && (it.t1 - p4.p - 700.0).abs() < 0.05, "{} {}", it.t0 - p4.p, it.t1 - p4.p);
         let silent: Vec<(String, i64)> = it.silent.iter().map(|x| (x.label.clone(), x.seconds.round() as i64)).collect();
         assert!(silent.contains(&("5".to_string(), 150)) && silent.contains(&("4".to_string(), 100)), "{silent:?}");
         assert_eq!(it.name, "260101_S100000-E101140_D001140_stereo_L-4_R-5.wav");
 
+        let cancel = AtomicBool::new(false);
         let sum = write(&plan, &[it.id], &dir.join("sync"), &cancel, |_| {}).unwrap();
-        let path = PathBuf::from(sum.outcomes[0].path.clone().unwrap());
-        let info = wav::read_info(&path).unwrap();
-        let raw = wav::read_at(&path, info.data_offset, info.data_len).unwrap();
-        let lr: Vec<(f32, f32)> =
-            raw.chunks_exact(8).map(|c| (f32::from_le_bytes(c[0..4].try_into().unwrap()), f32::from_le_bytes(c[4..8].try_into().unwrap()))).collect();
-        assert_eq!(lr.len(), n(700));
+        let lr = lr_of(&out_path(&sum, it.id));
+        assert!((lr.len() as i64 - n(700) as i64).abs() <= 2);
         assert!(lr[..n(149)].iter().all(|v| v.1 == 0.0), "right silent before 5 starts");
         assert!(lr[n(601)..].iter().all(|v| v.0 == 0.0), "left silent after 4 stops");
         assert!(lr[n(601)..n(602)].iter().any(|v| v.1 != 0.0), "right keeps playing after 4 stops");
         for k in [0usize, 777, n(300)] {
             assert_eq!(lr[k].0, four[k]);
         }
+    }
+
+    #[test]
+    fn placements_follow_pairs_and_invert() {
+        let (_dir, plan, ..) = solo_setup("place");
+        let (p4, p5) = (plan.places[0], plan.places[1]);
+        assert_eq!((p4.p, p4.s), (plan.tracks[0].start_secs as f64, 1.0));
+        assert!((p5.p - p4.p - 150.0).abs() < 0.005, "{p5:?}");
+        let t = p4.p + 321.25;
+        assert!((p5.to_timeline(p5.to_track(t)) - t).abs() < 1e-6);
+    }
+
+    #[test]
+    fn edits_split_retarget_delete_and_persist() {
+        let (dir, mut plan, ..) = solo_setup("edits");
+        let p4 = plan.places[0];
+        let split = |clips: &[Clip], track: usize, tau: f64| -> Vec<Clip> {
+            clips
+                .iter()
+                .flat_map(|c| {
+                    if c.track == track && c.t0 < tau && tau < c.t1 {
+                        vec![Clip { t1: tau, ..c.clone() }, Clip { t0: tau, ..c.clone() }]
+                    } else {
+                        vec![c.clone()]
+                    }
+                })
+                .collect()
+        };
+        let count = |plan: &SyncPlan, kind: &str| plan.items.iter().filter(|i| i.kind == kind).count();
+        let base = plan.clips.clone();
+        let (q4, q5) = (plan.places[0], plan.places[1]);
+        let mid = p4.p + 300.0;
+        let edit_file = dir.join("tracks").join(EDIT_FILE);
+
+        apply_clips(&mut plan, split(&base, 0, q4.to_track(mid))).unwrap();
+        assert_eq!((count(&plan, "stereo"), count(&plan, "mono")), (1, 0), "splitting one track keeps one file");
+        assert!(plan.edited && edit_file.exists());
+
+        apply_clips(&mut plan, split(&split(&base, 0, q4.to_track(mid)), 1, q5.to_track(mid))).unwrap();
+        assert_eq!(count(&plan, "stereo"), 2, "splitting both tracks at one instant splits the file");
+        assert!((plan.items[0].t1 - mid).abs() < 0.01 && (plan.items[1].t0 - mid).abs() < 0.01);
+
+        let (a, b) = (q5.to_track(p4.p + 400.0), q5.to_track(p4.p + 500.0));
+        let mut m = split(&split(&base, 1, a), 1, b);
+        for c in m.iter_mut() {
+            if c.track == 1 && (c.t0 - a).abs() < 1e-6 {
+                c.mode = ClipMode::Mono;
+            }
+        }
+        apply_clips(&mut plan, m).unwrap();
+        assert_eq!((count(&plan, "stereo"), count(&plan, "mono")), (1, 1));
+        let st = plan.items.iter().find(|i| i.kind == "stereo").unwrap();
+        let right_silent = st.silent.iter().find(|x| x.label == "5").map_or(0.0, |x| x.seconds);
+        assert!((right_silent - 250.0).abs() < 1.0, "{:?}", st.silent);
+        let mono = plan.items.iter().find(|i| i.kind == "mono").unwrap();
+        assert_eq!((mono.reason, plan.tracks[mono.left].label.as_str()), ("getrennt", "5"));
+        assert!((mono.duration - 100.0).abs() < 0.01);
+
+        let mut gone = base.clone();
+        gone.iter_mut().for_each(|c| c.deleted = true);
+        apply_clips(&mut plan, gone).unwrap();
+        assert!(plan.items.is_empty(), "deleted clips produce nothing");
+
+        let again = analyze(&[dir.join("tracks")], &AtomicBool::new(false), &mut |_| {}).unwrap();
+        assert!(again.edited && again.items.is_empty(), "the edit survives a new analysis");
+
+        reset_clips(&mut plan).unwrap();
+        assert!(!plan.edited && !edit_file.exists());
+        assert_eq!((count(&plan, "stereo"), count(&plan, "mono")), (1, 0));
+    }
+
+    #[test]
+    fn peaks_follow_the_signal() {
+        let (_dir, plan, ..) = solo_setup("peaks");
+        let d = plan.tracks[0].duration;
+        let coarse = peaks(&plan, 0, 0.0, d, 600);
+        assert_eq!(coarse.len(), 600);
+        assert!(coarse.iter().filter(|&&x| x > 100).count() > 550, "{:?}", &coarse[..20]);
+        assert_eq!(peaks(&plan, 0, 10.0, 10.5, 500).len(), 500);
+        assert!(peaks(&plan, 0, 5.0, 5.0, 10).iter().all(|&x| x == 0));
+        assert!((0.0..=40.0).contains(&plan.preview_gain_db[0]), "{}", plan.preview_gain_db[0]);
     }
 
     /// Two recorders, B starts 3.5 s later (file names claim 4 s). Same
@@ -2149,8 +2986,9 @@ mod tests {
         let stereo: Vec<&Item> = plan.items.iter().filter(|i| i.kind == "stereo").collect();
         let mono: Vec<&Item> = plan.items.iter().filter(|i| i.kind == "mono").collect();
         assert_eq!((stereo.len(), mono.len()), (2, 2), "{:#?}", plan.items);
-        assert!(stereo[0].t0.abs() < 1e-9, "leading seconds of A join the stereo file");
-        assert!((stereo[1].t1 - 963.5).abs() < 0.01, "trailing seconds of B join the stereo file");
+        let pa = plan.places[0];
+        assert!((stereo[0].t0 - pa.p).abs() < 1e-6, "leading seconds of A join the stereo file");
+        assert!((stereo[1].t1 - pa.p - 963.5).abs() < 0.01, "trailing seconds of B join the stereo file");
 
         let out = dir.join("sync");
         let ids: Vec<usize> = plan.items.iter().map(|i| i.id).collect();
@@ -2165,7 +3003,7 @@ mod tests {
         let raw = wav::read_at(&path, info.data_offset, info.data_len).unwrap();
         let lr: Vec<(f32, f32)> =
             raw.chunks_exact(8).map(|c| (f32::from_le_bytes(c[0..4].try_into().unwrap()), f32::from_le_bytes(c[4..8].try_into().unwrap()))).collect();
-        let f0 = (st.t0 * sr as f64).round() as usize;
+        let f0 = ((st.t0 - pa.p) * sr as f64).round() as usize;
         for k in [0usize, 777, 100_000, 1_000_000] {
             assert_eq!(lr[k].0, a[f0 + k]);
         }
@@ -2191,4 +3029,158 @@ mod tests {
         let again = write(&plan, &ids, &out, &cancel, |_| {}).unwrap();
         assert!(again.outcomes.iter().all(|o| o.status == Status::Existing));
     }
+
+    /// Interleaved float samples as a CBR MP3 with LAME tag (encoder delay and padding for gapless decoding).
+    fn write_mp3(path: &Path, sr: u32, channels: usize, pcm: &[f32]) {
+        use mp3lame_encoder::{Bitrate, Builder, FlushGap, InterleavedPcm, MonoPcm, Quality};
+        let mut b = Builder::new().unwrap();
+        b.set_num_channels(channels as u8).unwrap();
+        b.set_sample_rate(sr).unwrap();
+        b.set_brate(Bitrate::Kbps96).unwrap();
+        b.set_quality(Quality::Best).unwrap();
+        b.set_to_write_vbr_tag(true).unwrap();
+        let mut enc = b.build().unwrap();
+        let mut out = Vec::new();
+        for block in pcm.chunks(channels * 16_384) {
+            out.reserve(block.len() * 5 / 4 + 7200);
+            if channels == 1 { enc.encode_to_vec(MonoPcm(block), &mut out) } else { enc.encode_to_vec(InterleavedPcm(block), &mut out) }.unwrap();
+        }
+        out.reserve(7200);
+        enc.flush_to_vec::<FlushGap>(&mut out).unwrap();
+        let mut tag = Vec::with_capacity(enc.lame_tag_size());
+        enc.lame_tag_encode_to_vec(&mut tag).unwrap();
+        out[..tag.len()].copy_from_slice(&tag);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, out).unwrap();
+    }
+
+    /// Gain of `y` relative to `x` (least squares) and the lag in samples (−8…8) where they match best.
+    fn gain_and_lag(y: &dyn Fn(usize) -> f32, x: &dyn Fn(usize) -> f32, k0: usize, n: usize) -> (f64, i64) {
+        let score = |d: i64| (k0..k0 + n).map(|k| y(k) as f64 * x((k as i64 + d) as usize) as f64).sum::<f64>();
+        let lag = (-8i64..=8).max_by(|&a, &b| score(a).total_cmp(&score(b))).unwrap();
+        let energy: f64 = (k0..k0 + n).map(|k| (x((k as i64 + lag) as usize) as f64).powi(2)).sum();
+        (score(lag) / energy, lag)
+    }
+
+    /// Recorder 4 as a WAV track and a phone recording as stereo MP3 that really starts
+    /// 3.5 s later (its name says 4 s). The MP3 is decoded once into the cache, reused,
+    /// decoded again after the source changed, and synchronised like any track; its
+    /// stereo side and its mono file are the mono mix of both channels.
+    #[test]
+    fn decodes_compressed_sources_caches_and_syncs_them() {
+        let dir = tempdir("mp3");
+        let cache = tempdir("mp3-cache");
+        let sr = 16_000u32;
+        let n = |secs: f64| (secs * sr as f64) as usize;
+        let shift = n(3.5);
+        let s = talk(61, sr, n(400.0) + shift);
+        let mut floor = Lcg(62);
+        let four: Vec<f32> = (0..n(400.0)).map(|g| 0.5 * s[g] + 0.002 * (floor.next() as f32 - 0.5)).collect();
+        let phone: Vec<f32> = (0..n(400.0)).map(|k| 0.4 * s[k + shift] + 0.002 * (floor.next() as f32 - 0.5)).collect();
+        write_float_wav(&dir.join("tracks/260101_S100000-E100640_D000640_4.wav"), sr, &four);
+        let mp3 = dir.join("phone/Aufnahme 2026-01-01 10-00-04.mp3");
+        write_mp3(&mp3, sr, 2, &phone.iter().flat_map(|&v| [v, 0.6 * v]).collect::<Vec<f32>>());
+
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        let (old, recent) = (cache.join("00000000000000000000000000000000.wav"), cache.join("11111111111111111111111111111111.wav"));
+        fs::write(&old, b"x").unwrap();
+        fs::write(&recent, b"x").unwrap();
+        set_mtime(&old, now - 40.0 * 86_400.0);
+
+        let cancel = AtomicBool::new(false);
+        let mut stages = Vec::new();
+        let mut plan = analyze_in(&[dir.clone()], &cache, &cancel, &mut |p| stages.push(p.stage)).unwrap();
+        assert!(!old.exists() && recent.exists(), "only files unused for 30 days leave the cache");
+        assert!(stages.contains(&"decode") && stages.contains(&"envelope"), "{stages:?}");
+        assert!(plan.ignored.is_empty(), "{:?}", plan.ignored);
+        assert_eq!((plan.source, plan.labels.clone()), ("tracks", vec!["4".to_string(), "phone".to_string()]));
+        let ph = plan.tracks.iter().find(|t| t.label == "phone").unwrap().clone();
+        assert_eq!((ph.decoded_from.as_deref(), ph.name.as_str(), ph.path.as_str()), (Some("MP3"), "Aufnahme 2026-01-01 10-00-04.mp3", mp3.to_str().unwrap()));
+        assert_eq!(ph.start_secs, days_from_civil(2026, 1, 1) * 86400 + 10 * 3600 + 4, "start time from the file name");
+        assert_eq!(ph.info.channels, 2);
+        assert!((ph.duration - 400.0).abs() < 0.002, "gapless decoding keeps the length: {}", ph.duration);
+        let cached = ph.decoded.clone().unwrap();
+        assert!(cached.starts_with(&cache) && cached.exists());
+        let json = serde_json::to_value(&plan.tracks).unwrap();
+        assert!(json.to_string().contains("\"decoded_from\":\"MP3\"") && !json.to_string().contains(cache.to_str().unwrap()));
+
+        let pr = plan.pairs.iter().find(|p| p.ok).expect("pair in sync");
+        assert!((pr.offset - 3.5).abs() < 0.003, "offset {}", pr.offset);
+        let st = plan.items.iter().find(|i| i.kind == "stereo").expect("stereo item").clone();
+        let sum = write(&plan, &[st.id], &dir.join("sync"), &cancel, |_| {}).unwrap();
+        assert_eq!(sum.outcomes[0].status, Status::Written, "{:?}", sum.outcomes);
+        let lr = lr_of(&out_path(&sum, st.id));
+        let (p4, pp) = (plan.places[0], plan.places[ph.id]);
+        let a0 = ((st.t0 - p4.p) * sr as f64).round() as i64;
+        assert_eq!(lr[n(100.0)].0, four[(a0 + n(100.0) as i64) as usize], "left is recorder 4 bit-exactly");
+        // Channel 0 of the decoded copy; the file's right channel is 0.6 × left, so the mean is 0.8 × left.
+        let dec = wav::read_info(&cached).unwrap();
+        let raw = wav::read_at(&cached, dec.data_offset, dec.data_len).unwrap();
+        let left0: Vec<f32> = raw.chunks_exact(8).map(|c| f32::from_le_bytes(c[0..4].try_into().unwrap())).collect();
+        drop(raw);
+        let at_phone = |j: usize| (pp.to_track(st.t0 + j as f64 / sr as f64) * sr as f64).round() as i64;
+        let (g, lag) = gain_and_lag(&|j| lr[j].1, &|j| left0.get(at_phone(j).max(0) as usize).copied().unwrap_or(0.0), n(100.0), n(2.0));
+        assert!(lag.abs() <= 1 && (g - 0.8).abs() < 0.03, "right = mono mix of the MP3: gain {g}, lag {lag}");
+
+        // A multi-channel source on the mono side becomes a mono file of the same mix.
+        let clips: Vec<Clip> = plan.clips.iter().map(|c| Clip { mode: if c.track == ph.id { ClipMode::Mono } else { c.mode }, ..c.clone() }).collect();
+        apply_clips(&mut plan, clips).unwrap();
+        let mono = plan.items.iter().find(|i| i.kind == "mono" && i.left == ph.id).expect("mono item of the phone").clone();
+        let sum = write(&plan, &[mono.id], &dir.join("sync"), &cancel, |_| {}).unwrap();
+        assert_eq!(sum.outcomes[0].status, Status::Written, "{:?}", sum.outcomes);
+        let mpath = out_path(&sum, mono.id);
+        let info = wav::read_info(&mpath).unwrap();
+        assert_eq!((info.channels, info.sample_kind(), info.sample_rate), (1, Some(wav::SampleKind::F32), sr));
+        let raw = wav::read_at(&mpath, info.data_offset, info.data_len).unwrap();
+        let m: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        let m0 = (mono.t0 * sr as f64).round() as usize;
+        let (g, lag) = gain_and_lag(&|j| m[j], &|j| left0[m0 + j], n(50.0), n(2.0));
+        assert!(lag == 0 && (g - 0.8).abs() < 0.03, "mono file = mono mix: gain {g}, lag {lag}");
+        let mix = read_mono(&plan.tracks[ph.id], m0 as i64, m.len()).unwrap();
+        assert_eq!(m, mix, "the mono file is exactly the mix the analysis and the stereo side use");
+
+        // Unchanged source: the cached file is used as it is. Changed source: decoded again.
+        use std::os::unix::fs::MetadataExt;
+        let inode = fs::metadata(&cached).unwrap().ino();
+        let mut stages = Vec::new();
+        let again = analyze_in(&[dir.clone()], &cache, &cancel, &mut |p| stages.push((p.stage, p.done, p.total))).unwrap();
+        let ph2 = again.tracks.iter().find(|t| t.label == "phone").unwrap();
+        assert_eq!(ph2.decoded.as_ref(), Some(&cached));
+        assert_eq!(fs::metadata(&cached).unwrap().ino(), inode, "the cached file is reused, not decoded again");
+        assert!(again.edited, "the edit next to the sources applies to the decoded track too");
+        set_mtime(&mp3, now - 3600.0);
+        let third = analyze_in(&[dir.clone()], &cache, &cancel, &mut |_| {}).unwrap();
+        let ph3 = third.tracks.iter().find(|t| t.label == "phone").unwrap();
+        let fresh = ph3.decoded.clone().unwrap();
+        assert!(fresh != cached && fresh.exists(), "a changed source is decoded again");
+        assert_eq!((ph3.start_secs, ph3.frames), (ph.start_secs, ph.frames));
+        assert!(fs::read_dir(&cache).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".part")));
+    }
+
+    #[test]
+    fn mp4_creation_time_is_read_from_mvhd() {
+        let dir = tempdir("mp4-time");
+        let p = dir.join("rec.m4a");
+        let mut mvhd = vec![0u8; 100];
+        mvhd[4..8].copy_from_slice(&((1_767_261_600i64 + 2_082_844_800) as u32).to_be_bytes());
+        let boxed = |kind: &[u8], body: &[u8]| [&((body.len() + 8) as u32).to_be_bytes()[..], kind, body].concat();
+        let file = [boxed(b"ftyp", b"M4A \0\0\0\0"), boxed(b"mdat", &[1u8; 33]), boxed(b"moov", &[boxed(b"free", &[0; 3]), boxed(b"mvhd", &mvhd)].concat())].concat();
+        fs::write(&p, file).unwrap();
+        assert_eq!(decode::mp4_creation_time(&p), Some(1_767_261_600));
+        assert_eq!(compressed_start(&p, 10.0), Some(1_767_261_600 + scan::local_offset(1_767_261_600)));
+    }
+
+    /// Writes a real plan plus overview peaks as JSON for the browser tests of the timeline.
+    /// PA_DUMP_INPUTS=dir1:dir2 PA_DUMP_OUT=file cargo test --release --lib dump_plan_for_ui -- --ignored
+    #[test]
+    #[ignore]
+    fn dump_plan_for_ui() {
+        let inputs: Vec<PathBuf> = std::env::var("PA_DUMP_INPUTS").unwrap().split(':').map(PathBuf::from).collect();
+        let out = std::env::var("PA_DUMP_OUT").unwrap();
+        let plan = analyze(&inputs, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let peaks: Vec<Vec<u8>> = plan.tracks.iter().map(|t| super::peaks(&plan, t.id, 0.0, t.duration, 20_000)).collect();
+        let v = serde_json::json!({ "plan": plan, "peaks": peaks });
+        std::fs::write(out, serde_json::to_string(&v).unwrap()).unwrap();
+    }
+
 }
